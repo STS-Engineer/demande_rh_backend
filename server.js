@@ -144,7 +144,7 @@ app.post('/api/demandes', async (req, res) => {
 
 // Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details) {
-  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+  const baseUrl = 'https://hr-back.azurewebsites.net';
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
   let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
