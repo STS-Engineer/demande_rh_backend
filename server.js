@@ -199,6 +199,18 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   }
 
+  // 🔹 Si on écrit au responsable 2, préciser que R1 a déjà approuvé
+  let infoNiveauHtml = '';
+  if (niveau === 2 && employe.mail_responsable1) {
+    const resp1 = extraireNomPrenomDepuisEmail(employe.mail_responsable1);
+    infoNiveauHtml = `
+      <p style="margin-top:10px;">
+        Cette demande a déjà été approuvée par 
+        <strong>${resp1.fullName}</strong> (Responsable niveau 1).
+      </p>
+    `;
+  }
+
   const mailOptions = {
     from: {
       name: 'Administration STS',
@@ -208,7 +220,10 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     subject: `Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">Demande RH en attente d'approbation</h2>
+        <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+          Demande RH en attente d'approbation
+        </h2>
+        ${infoNiveauHtml}
         <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
           <p><strong>Poste:</strong> ${employe.poste}</p>
@@ -232,7 +247,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId}`);
+    console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
     console.error('Erreur envoi email:', error);
   }
@@ -568,7 +583,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         `
       });
 
-      // Email au responsable 2
+      // Email au responsable 2 (avec mention que R1 a déjà approuvé → géré dans envoyerEmailResponsable)
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
