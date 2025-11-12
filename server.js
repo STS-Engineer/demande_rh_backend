@@ -19,12 +19,32 @@ const pool = new Pool({
 });
 
 // Configuration SMTP Outlook
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   host: 'avocarbon-com.mail.protection.outlook.com',
   port: 25,
   secure: false,
   tls: { rejectUnauthorized: false }
 });
+
+// Fonction pour extraire le nom et prénom de l'email
+function extractNameFromEmail(email) {
+  if (!email) return 'le responsable';
+  
+  // Extraire la partie avant @
+  const username = email.split('@')[0];
+  
+  // Séparer par les points
+  const nameParts = username.split('.');
+  
+  if (nameParts.length >= 2) {
+    // Capitaliser la première lettre de chaque partie
+    const firstName = nameParts[0].charAt(0).toUpperCase() + nameParts[0].slice(1);
+    const lastName = nameParts[1].charAt(0).toUpperCase() + nameParts[1].slice(1);
+    return `${firstName} ${lastName}`;
+  }
+  
+  return 'le responsable';
+}
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
@@ -212,6 +232,78 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId}`);
   } catch (error) {
     console.error('Erreur envoi email:', error);
+  }
+}
+
+// Fonction pour envoyer email de notification à l'employé
+async function envoyerEmailNotificationEmploye(employe, details, niveau, emailResponsable, statut) {
+  const nomResponsable = extractNameFromEmail(emailResponsable);
+  
+  let sujet = '';
+  let messageStatut = '';
+  let couleur = '';
+  let icone = '';
+
+  if (statut === 'approuve_partiel') {
+    sujet = `Demande RH approuvée par ${nomResponsable}`;
+    messageStatut = `Votre demande a été approuvée par <strong>${nomResponsable}</strong> et est en attente de validation par le responsable suivant.`;
+    couleur = '#f59e0b';
+    icone = '🟡';
+  } else if (statut === 'approuve') {
+    sujet = 'Demande RH entièrement approuvée';
+    messageStatut = `Votre demande a été <strong>entièrement approuvée</strong> par <strong>${nomResponsable}</strong>.`;
+    couleur = '#10b981';
+    icone = '✅';
+  }
+
+  let detailsHtml = `
+    <p><strong>Type:</strong> ${details.type_demande === 'conges' ? 'Congé' : details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
+    <p><strong>Motif:</strong> ${details.titre}</p>
+    <p><strong>Date de départ:</strong> ${details.date_depart}</p>
+  `;
+
+  if (details.date_retour) {
+    detailsHtml += `<p><strong>Date de retour:</strong> ${details.date_retour}</p>`;
+  }
+  if (details.heure_depart) {
+    detailsHtml += `<p><strong>Heure de départ:</strong> ${details.heure_depart}</p>`;
+  }
+  if (details.heure_retour) {
+    detailsHtml += `<p><strong>Heure de retour:</strong> ${details.heure_retour}</p>`;
+  }
+
+  const mailOptions = {
+    from: {
+      name: 'Administration STS',
+      address: 'administration.STS@avocarbon.com'
+    },
+    to: employe.adresse_mail,
+    subject: `${icone} ${sujet}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: ${couleur}; border-bottom: 2px solid ${couleur}; padding-bottom: 10px;">
+          ${icone} ${sujet}
+        </h2>
+        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <p><strong>Bonjour ${employe.nom} ${employe.prenom},</strong></p>
+          <p>${messageStatut}</p>
+        </div>
+        <div style="margin: 20px 0;">
+          <h3 style="color: #374151;">Détails de votre demande:</h3>
+          ${detailsHtml}
+        </div>
+        <div style="background: ${couleur}15; padding: 15px; border-radius: 8px; border-left: 4px solid ${couleur};">
+          <p style="margin: 0; color: #374151;"><strong>Niveau d'approbation:</strong> ${niveau === 1 ? 'Premier responsable' : 'Deuxième responsable'}</p>
+        </div>
+      </div>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Email de notification envoyé à ${employe.adresse_mail} pour l'approbation niveau ${niveau}`);
+  } catch (error) {
+    console.error('Erreur envoi email notification:', error);
   }
 }
 
@@ -515,6 +607,28 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       [id]
     );
 
+    // Déterminer l'email du responsable actuel
+    const emailResponsableActuel = niveau == 1 ? demande.mail_responsable1 : demande.mail_responsable2;
+
+    // Envoyer email de notification à l'employé pour cette approbation
+    await envoyerEmailNotificationEmploye(
+      demande,
+      {
+        type_demande: demande.type_demande,
+        titre: demande.titre,
+        date_depart: demande.date_depart,
+        date_retour: demande.date_retour,
+        heure_depart: demande.heure_depart,
+        heure_retour: demande.heure_retour,
+        demi_journee: demande.demi_journee,
+        type_conge: demande.type_conge,
+        frais_deplacement: demande.frais_deplacement
+      },
+      niveau,
+      emailResponsableActuel,
+      'approuve_partiel'
+    );
+
     // Vérifier si besoin d'approbation du responsable 2
     if (niveau == 1 && demande.mail_responsable2) {
       // Envoyer au responsable 2
@@ -547,25 +661,24 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         [id]
       );
 
-      // Envoyer email de confirmation à l'employé
-      await transporter.sendMail({
-        from: {
-          name: 'Administration STS',
-          address: 'administration.STS@avocarbon.com'
+      // Envoyer email de confirmation finale à l'employé
+      await envoyerEmailNotificationEmploye(
+        demande,
+        {
+          type_demande: demande.type_demande,
+          titre: demande.titre,
+          date_depart: demande.date_depart,
+          date_retour: demande.date_retour,
+          heure_depart: demande.heure_depart,
+          heure_retour: demande.heure_retour,
+          demi_journee: demande.demi_journee,
+          type_conge: demande.type_conge,
+          frais_deplacement: demande.frais_deplacement
         },
-        to: demande.adresse_mail,
-        subject: 'Demande RH approuvée',
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #10b981;">✅ Votre demande RH a été approuvée</h2>
-            <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
-              <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-              <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été approuvée.</p>
-              <p><strong>Motif:</strong> ${demande.titre}</p>
-            </div>
-          </div>
-        `
-      });
+        niveau,
+        emailResponsableActuel,
+        'approuve'
+      );
 
       res.json({ 
         success: true, 
@@ -585,7 +698,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
   try {
     const demandeResult = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
@@ -603,6 +716,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
+    // Déterminer l'email du responsable qui refuse
+    const emailResponsable = niveau == 1 ? demande.mail_responsable1 : demande.mail_responsable2;
+    const nomResponsable = extractNameFromEmail(emailResponsable);
+
     // Mettre à jour le statut
     await pool.query(
       `UPDATE demande_rh 
@@ -618,13 +735,17 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: 'Demande RH refusée',
+      subject: '❌ Demande RH refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
+          <h2 style="color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 10px;">
+            ❌ Votre demande RH a été refusée
+          </h2>
           <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été refusée.</p>
+            <p>Votre demande a été refusée par <strong>${nomResponsable}</strong>.</p>
+            <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
+            <p><strong>Date de départ:</strong> ${demande.date_depart}</p>
             <p><strong>Motif du refus:</strong> ${commentaire}</p>
           </div>
         </div>
