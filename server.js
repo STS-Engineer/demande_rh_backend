@@ -5,45 +5,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-
-// Configuration CORS détaillée
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Autoriser les requêtes sans origin (comme les apps mobiles ou Postman)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'https://request-rh.azurewebsites.net',
-      'http://localhost:3000',
-      'http://localhost:3001'
-    ];
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin'],
-  credentials: true,
-  optionsSuccessStatus: 200,
-  preflightContinue: false
-};
-
-// Middleware CORS pour toutes les routes
-app.use(cors(corsOptions));
-
-// Gérer les pré-requêtes OPTIONS explicitement pour toutes les routes
-app.options('*', cors(corsOptions));
-
-// Middleware pour logger les requêtes CORS (pour debug)
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
-  next();
-});
-
-// Autres middlewares
+app.use(cors());
 app.use(express.json());
 
 // Configuration PostgreSQL
@@ -57,40 +19,18 @@ const pool = new Pool({
 });
 
 // Configuration SMTP Outlook
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   host: 'avocarbon-com.mail.protection.outlook.com',
   port: 25,
   secure: false,
   tls: { rejectUnauthorized: false }
 });
 
-// Fonction pour extraire le nom et prénom de l'email
-function extractNameFromEmail(email) {
-  if (!email) return 'le responsable';
-  
-  // Extraire la partie avant @
-  const username = email.split('@')[0];
-  
-  // Séparer par les points
-  const nameParts = username.split('.');
-  
-  if (nameParts.length >= 2) {
-    // Capitaliser la première lettre de chaque partie
-    const firstName = nameParts[0].charAt(0).toUpperCase() + nameParts[0].slice(1);
-    const lastName = nameParts[1].charAt(0).toUpperCase() + nameParts[1].slice(1);
-    return `${firstName} ${lastName}`;
-  }
-  
-  return 'le responsable';
-}
+// URL de base (à adapter si besoin)
+const BASE_URL = 'https://hr-back.azurewebsites.net';
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
-  // Ajouter manuellement les headers CORS pour cette route spécifique
-  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
-  
   try {
     const result = await pool.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
@@ -108,11 +48,6 @@ app.get('/api/employees/actifs', async (req, res) => {
 
 // Créer une nouvelle demande RH
 app.post('/api/demandes', async (req, res) => {
-  // Ajouter manuellement les headers CORS pour cette route spécifique
-  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
-
   const {
     employe_id,
     type_demande,
@@ -212,7 +147,7 @@ app.post('/api/demandes', async (req, res) => {
 
 // Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details) {
-  const baseUrl = 'https://hr-back.azurewebsites.net';
+  const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
   let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
@@ -280,78 +215,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId}`);
   } catch (error) {
     console.error('Erreur envoi email:', error);
-  }
-}
-
-// Fonction pour envoyer email de notification à l'employé
-async function envoyerEmailNotificationEmploye(employe, details, niveau, emailResponsable, statut) {
-  const nomResponsable = extractNameFromEmail(emailResponsable);
-  
-  let sujet = '';
-  let messageStatut = '';
-  let couleur = '';
-  let icone = '';
-
-  if (statut === 'approuve_partiel') {
-    sujet = `Demande RH approuvée par ${nomResponsable}`;
-    messageStatut = `Votre demande a été approuvée par <strong>${nomResponsable}</strong> et est en attente de validation par le responsable suivant.`;
-    couleur = '#f59e0b';
-    icone = '🟡';
-  } else if (statut === 'approuve') {
-    sujet = 'Demande RH entièrement approuvée';
-    messageStatut = `Votre demande a été <strong>entièrement approuvée</strong> par <strong>${nomResponsable}</strong>.`;
-    couleur = '#10b981';
-    icone = '✅';
-  }
-
-  let detailsHtml = `
-    <p><strong>Type:</strong> ${details.type_demande === 'conges' ? 'Congé' : details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-    <p><strong>Motif:</strong> ${details.titre}</p>
-    <p><strong>Date de départ:</strong> ${details.date_depart}</p>
-  `;
-
-  if (details.date_retour) {
-    detailsHtml += `<p><strong>Date de retour:</strong> ${details.date_retour}</p>`;
-  }
-  if (details.heure_depart) {
-    detailsHtml += `<p><strong>Heure de départ:</strong> ${details.heure_depart}</p>`;
-  }
-  if (details.heure_retour) {
-    detailsHtml += `<p><strong>Heure de retour:</strong> ${details.heure_retour}</p>`;
-  }
-
-  const mailOptions = {
-    from: {
-      name: 'Administration STS',
-      address: 'administration.STS@avocarbon.com'
-    },
-    to: employe.adresse_mail,
-    subject: `${icone} ${sujet}`,
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: ${couleur}; border-bottom: 2px solid ${couleur}; padding-bottom: 10px;">
-          ${icone} ${sujet}
-        </h2>
-        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          <p><strong>Bonjour ${employe.nom} ${employe.prenom},</strong></p>
-          <p>${messageStatut}</p>
-        </div>
-        <div style="margin: 20px 0;">
-          <h3 style="color: #374151;">Détails de votre demande:</h3>
-          ${detailsHtml}
-        </div>
-        <div style="background: ${couleur}15; padding: 15px; border-radius: 8px; border-left: 4px solid ${couleur};">
-          <p style="margin: 0; color: #374151;"><strong>Niveau d'approbation:</strong> ${niveau === 1 ? 'Premier responsable' : 'Deuxième responsable'}</p>
-        </div>
-      </div>
-    `
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Email de notification envoyé à ${employe.adresse_mail} pour l'approbation niveau ${niveau}`);
-  } catch (error) {
-    console.error('Erreur envoi email notification:', error);
   }
 }
 
@@ -622,13 +485,8 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande
+// Approuver une demande (avec mails à chaque étape)
 app.post('/api/demandes/:id/approuver', async (req, res) => {
-  // Headers CORS manuels
-  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
-
   const { id } = req.params;
   const { niveau } = req.body;
 
@@ -660,31 +518,32 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       [id]
     );
 
-    // Déterminer l'email du responsable actuel
-    const emailResponsableActuel = niveau == 1 ? demande.mail_responsable1 : demande.mail_responsable2;
-
-    // Envoyer email de notification à l'employé pour cette approbation
-    await envoyerEmailNotificationEmploye(
-      demande,
-      {
-        type_demande: demande.type_demande,
-        titre: demande.titre,
-        date_depart: demande.date_depart,
-        date_retour: demande.date_retour,
-        heure_depart: demande.heure_depart,
-        heure_retour: demande.heure_retour,
-        demi_journee: demande.demi_journee,
-        type_conge: demande.type_conge,
-        frais_deplacement: demande.frais_deplacement
-      },
-      niveau,
-      emailResponsableActuel,
-      'approuve_partiel'
-    );
-
-    // Vérifier si besoin d'approbation du responsable 2
+    // CAS 1 : Niveau 1 & responsable 2 existe → mail à l'employé + envoi à R2
     if (niveau == 1 && demande.mail_responsable2) {
-      // Envoyer au responsable 2
+      // Email à l'employé : étape 1 validée
+      await transporter.sendMail({
+        from: {
+          name: 'Administration STS',
+          address: 'administration.STS@avocarbon.com'
+        },
+        to: demande.adresse_mail,
+        subject: 'Votre demande RH a été approuvée par votre responsable hiérarchique (Niveau 1)',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
+            <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+              <p>Votre demande de <strong>${demande.type_demande}</strong> a été <strong>approuvée par votre premier responsable hiérarchique</strong>.</p>
+              <p>Elle est maintenant <strong>en attente de validation par le deuxième responsable</strong>.</p>
+              <p><strong>Date de départ :</strong> ${demande.date_depart}</p>
+              <p><strong>Motif :</strong> ${demande.titre}</p>
+            </div>
+            <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
+          </div>
+        `
+      });
+
+      // Email au responsable 2
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -703,41 +562,42 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         }
       );
       
-      res.json({ 
+      return res.json({ 
         success: true, 
         message: 'Demande approuvée par le premier responsable, en attente du second' 
       });
-    } else {
-      // Demande complètement approuvée
-      await pool.query(
-        `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
-        [id]
-      );
+    } 
+    
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou niveau 2)
+    await pool.query(
+      `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
+      [id]
+    );
 
-      // Envoyer email de confirmation finale à l'employé
-      await envoyerEmailNotificationEmploye(
-        demande,
-        {
-          type_demande: demande.type_demande,
-          titre: demande.titre,
-          date_depart: demande.date_depart,
-          date_retour: demande.date_retour,
-          heure_depart: demande.heure_depart,
-          heure_retour: demande.heure_retour,
-          demi_journee: demande.demi_journee,
-          type_conge: demande.type_conge,
-          frais_deplacement: demande.frais_deplacement
-        },
-        niveau,
-        emailResponsableActuel,
-        'approuve'
-      );
+    // Email final à l'employé
+    await transporter.sendMail({
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: demande.adresse_mail,
+      subject: 'Demande RH approuvée définitivement',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #10b981;">✅ Votre demande RH a été approuvée</h2>
+          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été <strong>approuvée définitivement</strong>.</p>
+            <p><strong>Motif:</strong> ${demande.titre}</p>
+          </div>
+        </div>
+      `
+    });
 
-      res.json({ 
-        success: true, 
-        message: 'Demande complètement approuvée' 
-      });
-    }
+    res.json({ 
+      success: true, 
+      message: 'Demande complètement approuvée' 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de l\'approbation' });
@@ -746,17 +606,12 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
 // Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
-  // Headers CORS manuels
-  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
-
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
 
   try {
     const demandeResult = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
@@ -774,10 +629,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Déterminer l'email du responsable qui refuse
-    const emailResponsable = niveau == 1 ? demande.mail_responsable1 : demande.mail_responsable2;
-    const nomResponsable = extractNameFromEmail(emailResponsable);
-
     // Mettre à jour le statut
     await pool.query(
       `UPDATE demande_rh 
@@ -793,17 +644,13 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: '❌ Demande RH refusée',
+      subject: 'Demande RH refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 10px;">
-            ❌ Votre demande RH a été refusée
-          </h2>
+          <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
           <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande a été refusée par <strong>${nomResponsable}</strong>.</p>
-            <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-            <p><strong>Date de départ:</strong> ${demande.date_depart}</p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été refusée.</p>
             <p><strong>Motif du refus:</strong> ${commentaire}</p>
           </div>
         </div>
@@ -822,11 +669,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
 // Récupérer les demandes d'un employé
 app.get('/api/demandes/employe/:id', async (req, res) => {
-  // Headers CORS manuels
-  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin');
-
   try {
     const result = await pool.query(
       `SELECT * FROM demande_rh 
