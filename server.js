@@ -26,8 +26,28 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false }
 });
 
-// URL de base (à adapter si besoin)
+// URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
+
+// Helper : extraire nom/prénom depuis l'adresse email
+function extraireNomPrenomDepuisEmail(email) {
+  if (!email) return { prenom: '', nom: '', fullName: '' };
+
+  const localPart = email.split('@')[0];
+  const rawParts = localPart.split(/[._-]+/).filter(Boolean);
+
+  const capitalize = (str) =>
+    str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
+
+  if (rawParts.length >= 2) {
+    const prenom = capitalize(rawParts[0]);
+    const nom = capitalize(rawParts[1]);
+    return { prenom, nom, fullName: `${prenom} ${nom}` };
+  } else {
+    const prenom = capitalize(rawParts[0]);
+    return { prenom, nom: '', fullName: prenom };
+  }
+}
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
@@ -485,7 +505,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande (avec mails à chaque étape)
+// Approuver une demande (avec noms des responsables dans les mails)
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -512,29 +532,34 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mettre à jour l'approbation
+    // Mettre à jour l'approbation (R1 ou R2)
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
 
-    // CAS 1 : Niveau 1 & responsable 2 existe → mail à l'employé + envoi à R2
+    // Noms des responsables à partir de leurs emails
+    const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
+    const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
+
+    // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
-      // Email à l'employé : étape 1 validée
+
+      // Email à l'employé : approuvé par R1, en attente de R2
       await transporter.sendMail({
         from: {
           name: 'Administration STS',
           address: 'administration.STS@avocarbon.com'
         },
         to: demande.adresse_mail,
-        subject: 'Votre demande RH a été approuvée par votre responsable hiérarchique (Niveau 1)',
+        subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
             <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
               <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-              <p>Votre demande de <strong>${demande.type_demande}</strong> a été <strong>approuvée par votre premier responsable hiérarchique</strong>.</p>
-              <p>Elle est maintenant <strong>en attente de validation par le deuxième responsable</strong>.</p>
+              <p>Votre demande de <strong>${demande.type_demande}</strong> a été <strong>approuvée par ${resp1 ? resp1.fullName : 'votre responsable hiérarchique'}</strong>.</p>
+              <p>Elle est maintenant <strong>en attente d'approbation par ${resp2 ? resp2.fullName : 'le deuxième responsable'}</strong>.</p>
               <p><strong>Date de départ :</strong> ${demande.date_depart}</p>
               <p><strong>Motif :</strong> ${demande.titre}</p>
             </div>
@@ -567,12 +592,20 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         message: 'Demande approuvée par le premier responsable, en attente du second' 
       });
     } 
-    
-    // CAS 2 : Demande complètement approuvée (pas de R2 ou niveau 2)
+
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
     await pool.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
     );
+
+    // Qui est l'approbateur final ?
+    let approuveur = null;
+    if (niveau == 1 && !demande.mail_responsable2) {
+      approuveur = resp1; // seul responsable
+    } else if (niveau == 2) {
+      approuveur = resp2; // deuxième approbation
+    }
 
     // Email final à l'employé
     await transporter.sendMail({
@@ -581,13 +614,14 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: 'Demande RH approuvée définitivement',
+      subject: 'Votre demande RH a été définitivement approuvée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #10b981;">✅ Votre demande RH a été approuvée</h2>
+          <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
           <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été <strong>approuvée définitivement</strong>.</p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été <strong>approuvée</strong>.</p>
+            ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
             <p><strong>Motif:</strong> ${demande.titre}</p>
           </div>
         </div>
@@ -604,14 +638,14 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande
+// Refuser une demande (avec nom du responsable qui refuse)
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
 
   try {
     const demandeResult = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
@@ -629,7 +663,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Mettre à jour le statut
+    // Mise à jour statut
     await pool.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', commentaire_refus = $1, updated_at = CURRENT_TIMESTAMP 
@@ -637,20 +671,32 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       [commentaire, id]
     );
 
-    // Envoyer email à l'employé
+    // Identité du responsable qui refuse
+    const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
+    const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
+
+    let refuserParTexte = 'votre responsable hiérarchique';
+    if (niveau == 1 && resp1) {
+      refuserParTexte = resp1.fullName;
+    } else if (niveau == 2 && resp2) {
+      refuserParTexte = resp2.fullName;
+    }
+
+    // Email à l'employé
     await transporter.sendMail({
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: 'Demande RH refusée',
+      subject: 'Votre demande RH a été refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
           <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
             <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été refusée.</p>
+            <p>La décision a été prise par <strong>${refuserParTexte}</strong>.</p>
             <p><strong>Motif du refus:</strong> ${commentaire}</p>
           </div>
         </div>
