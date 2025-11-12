@@ -5,7 +5,27 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// Configuration CORS détaillée
+const corsOptions = {
+  origin: [
+    'https://request-rh.azurewebsites.net',
+    'http://localhost:3000',
+    'http://localhost:3001'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+// Middleware CORS
+app.use(cors(corsOptions));
+
+// Gérer les pré-requêtes OPTIONS explicitement
+app.options('*', cors(corsOptions));
+
+// Autres middlewares
 app.use(express.json());
 
 // Configuration PostgreSQL
@@ -65,6 +85,11 @@ app.get('/api/employees/actifs', async (req, res) => {
 
 // Créer une nouvelle demande RH
 app.post('/api/demandes', async (req, res) => {
+  // Ajouter les headers CORS manuellement pour cette route
+  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
   const {
     employe_id,
     type_demande,
@@ -576,6 +601,11 @@ app.get('/approuver-demande', async (req, res) => {
 
 // Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
+  // Headers CORS
+  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
   const { id } = req.params;
   const { niveau } = req.body;
 
@@ -693,6 +723,11 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
 // Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
+  // Headers CORS
+  res.header('Access-Control-Allow-Origin', 'https://request-rh.azurewebsites.net');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
 
