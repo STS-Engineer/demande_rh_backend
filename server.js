@@ -494,8 +494,8 @@ app.get('/approuver-demande', async (req, res) => {
           </div>
           
           <div class="buttons">
-            <button class="approve" onclick="approuver()">✅ Approuver</button>
-            <button class="reject" onclick="toggleRefus()">❌ Refuser</button>
+            <button class="approve" id="approveBtn" onclick="approuver()">✅ Approuver</button>
+            <button class="reject" id="rejectBtn" onclick="toggleRefus()">❌ Refuser</button>
           </div>
           
           <div class="refus-section">
@@ -505,44 +505,111 @@ app.get('/approuver-demande', async (req, res) => {
         </div>
 
         <script>
+          function setProcessing(isProcessing) {
+            const approveBtn = document.getElementById('approveBtn');
+            const rejectBtn = document.getElementById('rejectBtn');
+            const confirmRefus = document.getElementById('confirmRefus');
+
+            [approveBtn, rejectBtn, confirmRefus].forEach(btn => {
+              if (btn) btn.disabled = isProcessing;
+            });
+
+            if (approveBtn) {
+              approveBtn.textContent = isProcessing ? 'Traitement...' : '✅ Approuver';
+            }
+            if (confirmRefus) {
+              confirmRefus.textContent = isProcessing ? 'Traitement...' : 'Confirmer le refus';
+            }
+          }
+
+          function showResult(status, message) {
+            const badge = document.querySelector('.status-badge');
+            if (badge) {
+              if (status === 'approuve') {
+                badge.textContent = 'Demande approuvée';
+                badge.style.background = '#d1fae5';
+                badge.style.color = '#065f46';
+              } else if (status === 'refuse') {
+                badge.textContent = 'Demande refusée';
+                badge.style.background = '#fee2e2';
+                badge.style.color = '#991b1b';
+              }
+            }
+
+            const buttons = document.querySelector('.buttons');
+            if (buttons) buttons.style.display = 'none';
+
+            const refusSection = document.querySelector('.refus-section');
+            if (refusSection) refusSection.style.display = 'none';
+
+            const card = document.querySelector('.card');
+            if (card && message) {
+              const info = document.createElement('p');
+              info.style.marginTop = '20px';
+              info.style.textAlign = 'center';
+              info.style.color = '#374151';
+              info.textContent = message;
+              card.appendChild(info);
+            }
+          }
+
           function toggleRefus() {
-            document.getElementById('commentaire').style.display = 'block';
-            document.getElementById('confirmRefus').style.display = 'inline-block';
+            const commentaire = document.getElementById('commentaire');
+            const confirmRefus = document.getElementById('confirmRefus');
+            if (commentaire) commentaire.style.display = 'block';
+            if (confirmRefus) confirmRefus.style.display = 'inline-block';
           }
 
           async function approuver() {
-            const response = await fetch('/api/demandes/${id}/approuver', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ niveau: ${Number(niveau) || 1} })
-            });
-            
-            if (response.ok) {
-              alert('✅ Demande approuvée avec succès');
-              window.location.reload();
-            } else {
-              alert('❌ Erreur lors de l\\'approbation');
+            setProcessing(true);
+            try {
+              const response = await fetch('/api/demandes/${id}/approuver', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ niveau: ${Number(niveau) || 1} })
+              });
+              
+              if (response.ok) {
+                const data = await response.json().catch(() => ({}));
+                showResult('approuve', data.message || 'Votre décision a été enregistrée.');
+              } else {
+                alert('❌ Erreur lors de l\\'approbation');
+                setProcessing(false);
+              }
+            } catch (e) {
+              console.error(e);
+              alert('❌ Erreur réseau');
+              setProcessing(false);
             }
           }
 
           async function refuser() {
-            const commentaire = document.getElementById('commentaire').value;
+            const commentaireInput = document.getElementById('commentaire');
+            const commentaire = commentaireInput ? commentaireInput.value : '';
             if (!commentaire.trim()) {
               alert('Veuillez indiquer le motif du refus');
               return;
             }
 
-            const response = await fetch('/api/demandes/${id}/refuser', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ niveau: ${Number(niveau) || 1}, commentaire })
-            });
-            
-            if (response.ok) {
-              alert('✅ Demande refusée');
-              window.location.reload();
-            } else {
-              alert('❌ Erreur lors du refus');
+            setProcessing(true);
+            try {
+              const response = await fetch('/api/demandes/${id}/refuser', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ niveau: ${Number(niveau) || 1}, commentaire })
+              });
+              
+              if (response.ok) {
+                const data = await response.json().catch(() => ({}));
+                showResult('refuse', data.message || 'Votre décision a été enregistrée.');
+              } else {
+                alert('❌ Erreur lors du refus');
+                setProcessing(false);
+              }
+            } catch (e) {
+              console.error(e);
+              alert('❌ Erreur réseau');
+              setProcessing(false);
             }
           }
         </script>
