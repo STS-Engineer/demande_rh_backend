@@ -49,6 +49,16 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+// Helper : formatage simple de date (sans heure)
+function formatDateShort(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
+  // Exemple : "Thu Nov 27 2025"
+  return d.toDateString();
+  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
+}
+
 // Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
@@ -191,13 +201,13 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   let detailsHtml = `
     <p><strong>Type:</strong> ${typeLabel}</p>
     <p><strong>Motif:</strong> ${details.titre}</p>
-    <p><strong>Date de départ:</strong> ${details.date_depart}</p>
+    <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
   `;
 
   if (details.type_demande === 'conges') {
     const typeCongeLabel = getTypeCongeLabel(details.type_conge, details.type_conge_autre);
     detailsHtml += `
-      <p><strong>Date de retour:</strong> ${details.date_retour || 'Non spécifié'}</p>
+      <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Demi-journée:</strong> ${details.demi_journee ? 'Oui' : 'Non'}</p>
       <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
     `;
@@ -208,14 +218,14 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   } else if (details.type_demande === 'mission') {
     detailsHtml += `
-      <p><strong>Date de retour:</strong> ${details.date_retour || 'Non spécifié'}</p>
+      <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Heure de sortie:</strong> ${details.heure_depart || 'Non spécifié'}</p>
       <p><strong>Heure de retour:</strong> ${details.heure_retour || 'Non spécifié'}</p>
       <p><strong>Frais de déplacement:</strong> ${details.frais_deplacement || 0} TND</p>
     `;
   }
 
-  // 🔹 Si on écrit au responsable 2, préciser que R1 a déjà approuvé
+  // Si on écrit au responsable 2, préciser que R1 a déjà approuvé
   let infoNiveauHtml = '';
   if (niveau === 2 && employe.mail_responsable1) {
     const resp1 = extraireNomPrenomDepuisEmail(employe.mail_responsable1);
@@ -449,12 +459,12 @@ app.get('/approuver-demande', async (req, res) => {
             </div>
             <div class="info-item">
               <div class="info-label">Date de départ:</div>
-              <div class="info-value">${demande.date_depart}</div>
+              <div class="info-value">${formatDateShort(demande.date_depart)}</div>
             </div>
             ${demande.date_retour ? `
             <div class="info-item">
               <div class="info-label">Date de retour:</div>
-              <div class="info-value">${demande.date_retour}</div>
+              <div class="info-value">${formatDateShort(demande.date_retour)}</div>
             </div>
             ` : ''}
             ${demande.heure_depart ? `
@@ -607,7 +617,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
               <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
               <p>Votre demande de <strong>${demande.type_demande}</strong> a été <strong>approuvée par ${resp1 ? resp1.fullName : 'votre responsable hiérarchique'}</strong>.</p>
               <p>Elle est maintenant <strong>en attente d'approbation par ${resp2 ? resp2.fullName : 'le deuxième responsable'}</strong>.</p>
-              <p><strong>Date de départ :</strong> ${demande.date_depart}</p>
+              <p><strong>Date de départ :</strong> ${formatDateShort(demande.date_depart)}</p>
               <p><strong>Motif :</strong> ${demande.titre}</p>
             </div>
             <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
@@ -672,7 +682,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
           <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été <strong>approuvée</strong>.</p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${formatDateShort(demande.date_depart)}</strong> a été <strong>approuvée</strong>.</p>
             ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
             <p><strong>Motif:</strong> ${demande.titre}</p>
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
@@ -752,7 +762,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
           <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
           <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été refusée.</p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${formatDateShort(demande.date_depart)}</strong> a été refusée.</p>
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
             <p>La décision a été prise par <strong>${refuserParTexte}</strong>.</p>
             <p><strong>Motif du refus:</strong> ${commentaire}</p>
