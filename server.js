@@ -49,6 +49,17 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+// Helper : label type de congé
+function getTypeCongeLabel(type_conge, type_conge_autre) {
+  if (!type_conge) return 'Non spécifié';
+  if (type_conge === 'annuel') return 'Congé annuel';
+  if (type_conge === 'sans_solde') return 'Congé sans solde';
+  if (type_conge === 'autre') {
+    return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
+  }
+  return type_conge;
+}
+
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
   try {
@@ -78,7 +89,8 @@ app.post('/api/demandes', async (req, res) => {
     heure_retour,
     demi_journee,
     type_conge,
-    frais_deplacement
+    frais_deplacement,
+    type_conge_autre
   } = req.body;
 
   try {
@@ -108,13 +120,14 @@ app.post('/api/demandes', async (req, res) => {
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
     const fraisDeplacementFinal = frais_deplacement && frais_deplacement !== '' ? parseFloat(frais_deplacement) : null;
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
+    const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
     // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
-        heure_depart, heure_retour, demi_journee, type_conge, frais_deplacement, statut)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
         employe_id, 
@@ -125,7 +138,8 @@ app.post('/api/demandes', async (req, res) => {
         heureDepartFinal, 
         heureRetourFinal, 
         demi_journee || false, 
-        typeCongeFinal, 
+        typeCongeFinal,
+        typeCongeAutreFinal,
         fraisDeplacementFinal,
         'en_attente'
       ]
@@ -148,7 +162,8 @@ app.post('/api/demandes', async (req, res) => {
           heure_depart: heureDepartFinal, 
           heure_retour: heureRetourFinal, 
           demi_journee, 
-          type_conge: typeCongeFinal, 
+          type_conge: typeCongeFinal,
+          type_conge_autre: typeCongeAutreFinal,
           frais_deplacement: fraisDeplacementFinal 
         }
       );
@@ -180,10 +195,11 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   `;
 
   if (details.type_demande === 'conges') {
+    const typeCongeLabel = getTypeCongeLabel(details.type_conge, details.type_conge_autre);
     detailsHtml += `
       <p><strong>Date de retour:</strong> ${details.date_retour || 'Non spécifié'}</p>
       <p><strong>Demi-journée:</strong> ${details.demi_journee ? 'Oui' : 'Non'}</p>
-      <p><strong>Type de congé:</strong> ${details.type_conge === 'annuel' ? 'Congé annuel' : details.type_conge === 'sans_solde' ? 'Congé sans solde' : 'Non spécifié'}</p>
+      <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
     `;
   } else if (details.type_demande === 'autorisation') {
     detailsHtml += `
@@ -291,6 +307,16 @@ app.get('/approuver-demande', async (req, res) => {
         </html>
       `);
     }
+
+    const typeDemandeLabel = demande.type_demande === 'conges'
+      ? 'Congé'
+      : demande.type_demande === 'autorisation'
+        ? 'Autorisation'
+        : 'Mission';
+
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
 
     res.send(`
       <!DOCTYPE html>
@@ -415,7 +441,7 @@ app.get('/approuver-demande', async (req, res) => {
             </div>
             <div class="info-item">
               <div class="info-label">Type de demande:</div>
-              <div class="info-value">${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</div>
+              <div class="info-value">${typeDemandeLabel}</div>
             </div>
             <div class="info-item">
               <div class="info-label">Motif:</div>
@@ -449,6 +475,12 @@ app.get('/approuver-demande', async (req, res) => {
               <div class="info-value">${demande.frais_deplacement} TND</div>
             </div>
             ` : ''}
+            ${demande.type_demande === 'conges' ? `
+            <div class="info-item">
+              <div class="info-label">Type de congé:</div>
+              <div class="info-value">${typeCongeLabel}</div>
+            </div>
+            ` : ''}
           </div>
           
           <div class="buttons">
@@ -472,7 +504,7 @@ app.get('/approuver-demande', async (req, res) => {
             const response = await fetch('/api/demandes/${id}/approuver', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ niveau: ${niveau} })
+              body: JSON.stringify({ niveau: ${Number(niveau) || 1} })
             });
             
             if (response.ok) {
@@ -493,7 +525,7 @@ app.get('/approuver-demande', async (req, res) => {
             const response = await fetch('/api/demandes/${id}/refuser', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ niveau: ${niveau}, commentaire })
+              body: JSON.stringify({ niveau: ${Number(niveau) || 1}, commentaire })
             });
             
             if (response.ok) {
@@ -598,6 +630,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           heure_retour: demande.heure_retour,
           demi_journee: demande.demi_journee,
           type_conge: demande.type_conge,
+          type_conge_autre: demande.type_conge_autre,
           frais_deplacement: demande.frais_deplacement
         }
       );
@@ -622,6 +655,10 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       approuveur = resp2; // deuxième approbation
     }
 
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
+
     // Email final à l'employé
     await transporter.sendMail({
       from: {
@@ -638,6 +675,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été <strong>approuvée</strong>.</p>
             ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
             <p><strong>Motif:</strong> ${demande.titre}</p>
+            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
           </div>
         </div>
       `
@@ -697,6 +735,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       refuserParTexte = resp2.fullName;
     }
 
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
+
     // Email à l'employé
     await transporter.sendMail({
       from: {
@@ -711,6 +753,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
           <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
             <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${demande.date_depart}</strong> a été refusée.</p>
+            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
             <p>La décision a été prise par <strong>${refuserParTexte}</strong>.</p>
             <p><strong>Motif du refus:</strong> ${commentaire}</p>
           </div>
