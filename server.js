@@ -53,8 +53,10 @@ function extraireNomPrenomDepuisEmail(email) {
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date;
+  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
+  // Exemple : "Thu Nov 27 2025"
   return d.toDateString();
+  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
 }
 
 // Helper : label type de congé
@@ -130,14 +132,12 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
-    // Insérer la demande avec les champs d'approbation
+    // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
-        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, 
-        frais_deplacement, statut, approuve_responsable1, approuve_responsable2,
-        refuse_par_responsable1, refuse_par_responsable2)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
         employe_id, 
@@ -151,11 +151,7 @@ app.post('/api/demandes', async (req, res) => {
         typeCongeFinal,
         typeCongeAutreFinal,
         fraisDeplacementFinal,
-        'en_attente',
-        false, // approuve_responsable1
-        false, // approuve_responsable2
-        false, // refuse_par_responsable1
-        false  // refuse_par_responsable2
+        'en_attente'
       ]
     );
 
@@ -633,7 +629,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande
+// Approuver une demande (avec noms des responsables dans les mails)
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -658,27 +654,22 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    const colonneApprobation = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    const colonneRefus = niveau == 1 ? 'refuse_par_responsable1' : 'refuse_par_responsable2';
+    const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mettre à jour l'approbation et réinitialiser le refus
+    // Mettre à jour l'approbation (R1 ou R2)
     await pool.query(
-      `UPDATE demande_rh 
-       SET ${colonneApprobation} = true, 
-           ${colonneRefus} = false,
-           updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $1`,
+      `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
 
-    // Noms des responsables
+    // Noms des responsables à partir de leurs emails
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
     // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
 
-      // Email à l'employé
+      // Email à l'employé : approuvé par R1, en attente de R2
       await transporter.sendMail({
         from: {
           name: 'Administration STS',
@@ -701,7 +692,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         `
       });
 
-      // Email au responsable 2
+      // Email au responsable 2 (avec mention que R1 a déjà approuvé → géré dans envoyerEmailResponsable)
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -727,7 +718,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       });
     } 
 
-    // CAS 2 : Demande complètement approuvée
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
     await pool.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
@@ -736,9 +727,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     // Qui est l'approbateur final ?
     let approuveur = null;
     if (niveau == 1 && !demande.mail_responsable2) {
-      approuveur = resp1;
+      approuveur = resp1; // seul responsable
     } else if (niveau == 2) {
-      approuveur = resp2;
+      approuveur = resp2; // deuxième approbation
     }
 
     const typeCongeLabel = demande.type_demande === 'conges'
@@ -777,7 +768,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande
+// Refuser une demande (avec nom du responsable qui refuse)
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -802,17 +793,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    const colonneApprobation = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    const colonneRefus = niveau == 1 ? 'refuse_par_responsable1' : 'refuse_par_responsable2';
-
-    // Mise à jour : mettre l'approbation à false, le refus à true, et le statut global à "refuse"
+    // Mise à jour statut
     await pool.query(
       `UPDATE demande_rh 
-       SET ${colonneApprobation} = false, 
-           ${colonneRefus} = true,
-           statut = 'refuse', 
-           commentaire_refus = $1, 
-           updated_at = CURRENT_TIMESTAMP 
+       SET statut = 'refuse', commentaire_refus = $1, updated_at = CURRENT_TIMESTAMP 
        WHERE id = $2`,
       [commentaire, id]
     );
