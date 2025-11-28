@@ -656,7 +656,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mettre à jour l'approbation (R1 ou R2)
+    // Mettre à jour l'approbation (R1 ou R2) à TRUE
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
@@ -768,7 +768,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande (avec nom du responsable qui refuse)
+// Refuser une demande (avec nom du responsable qui refuse) - CORRIGÉ
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -793,10 +793,16 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Mise à jour statut
+    // CORRECTION : Mettre à jour le champ approuve_responsable à FALSE selon le niveau
+    const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
+    
+    // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
-       SET statut = 'refuse', commentaire_refus = $1, updated_at = CURRENT_TIMESTAMP 
+       SET statut = 'refuse', 
+           commentaire_refus = $1, 
+           ${colonneRefus} = false,
+           updated_at = CURRENT_TIMESTAMP 
        WHERE id = $2`,
       [commentaire, id]
     );
