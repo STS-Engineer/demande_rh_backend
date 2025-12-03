@@ -54,10 +54,8 @@ function extraireNomPrenomDepuisEmail(email) {
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
-  // Exemple : "Thu Nov 27 2025"
+  if (Number.isNaN(d.getTime())) return date;
   return d.toDateString();
-  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
 }
 
 // Helper : label type de congé
@@ -70,6 +68,19 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   }
   return type_conge;
 }
+
+// Middleware d'authentification (simplifié)
+const authenticateToken = (req, res, next) => {
+  const token = req.headers['authorization']?.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token manquant' });
+  }
+  
+  // Ici, vous devriez valider le token JWT
+  // Pour l'instant, on accepte tous les tokens
+  next();
+};
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
@@ -85,6 +96,63 @@ app.get('/api/employees/actifs', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors de la récupération des employés' });
+  }
+});
+
+// Récupérer toutes les demandes avec filtres
+app.get('/api/demandes', authenticateToken, async (req, res) => {
+  try {
+    const { statut, date_debut, date_fin } = req.query;
+    
+    let query = `
+      SELECT 
+        d.*,
+        e.matricule AS employe_matricule,
+        e.nom AS employe_nom,
+        e.prenom AS employe_prenom,
+        e.poste AS employe_poste,
+        e.adresse_mail AS employe_email,
+        e.mail_responsable1,
+        e.mail_responsable2
+      FROM demande_rh d
+      JOIN employees e ON d.employe_id = e.id
+      WHERE 1=1
+    `;
+    
+    const queryParams = [];
+    let paramCount = 1;
+
+    if (statut) {
+      query += ` AND d.statut = $${paramCount}`;
+      queryParams.push(statut);
+      paramCount++;
+    }
+
+    if (date_debut) {
+      query += ` AND d.date_depart >= $${paramCount}`;
+      queryParams.push(date_debut);
+      paramCount++;
+    }
+
+    if (date_fin) {
+      query += ` AND d.date_depart <= $${paramCount}`;
+      queryParams.push(date_fin);
+      paramCount++;
+    }
+
+    query += ` ORDER BY d.created_at DESC`;
+
+    const result = await pool.query(query, queryParams);
+    
+    res.json({ 
+      success: true, 
+      demandes: result.rows 
+    });
+  } catch (err) {
+    console.error('Erreur récupération demandes:', err);
+    res.status(500).json({ 
+      error: 'Erreur lors de la récupération des demandes' 
+    });
   }
 });
 
@@ -630,7 +698,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande (avec noms des responsables dans les mails)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -769,7 +837,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande (avec nom du responsable qui refuse) - CORRIGÉ
+// Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -872,7 +940,7 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
 });
 
 // Route pour exporter les demandes en Excel
-app.get('/api/demandes/export/excel', async (req, res) => {
+app.get('/api/demandes/export/excel', authenticateToken, async (req, res) => {
   try {
     // Récupérer toutes les demandes avec les informations des employés
     const result = await pool.query(`
@@ -1043,6 +1111,15 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString()
+  });
+});
+
+// Route 404 pour les routes non trouvées
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Route non trouvée',
+    path: req.path,
+    method: req.method
   });
 });
 
