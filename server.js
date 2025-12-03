@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const XLSX = require('xlsx');
 require('dotenv').config();
 
 const app = express();
@@ -870,6 +871,172 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
   }
 });
 
+// Route pour exporter les demandes en Excel
+app.get('/api/demandes/export/excel', async (req, res) => {
+  try {
+    // Récupérer toutes les demandes avec les informations des employés
+    const result = await pool.query(`
+      SELECT 
+        d.id,
+        d.type_demande,
+        d.titre,
+        d.date_depart,
+        d.date_retour,
+        d.heure_depart,
+        d.heure_retour,
+        d.demi_journee,
+        d.type_conge,
+        d.type_conge_autre,
+        d.frais_deplacement,
+        d.statut,
+        d.approuve_responsable1,
+        d.approuve_responsable2,
+        d.commentaire_refus,
+        d.created_at,
+        d.updated_at,
+        e.matricule,
+        e.nom AS employe_nom,
+        e.prenom AS employe_prenom,
+        e.poste AS employe_poste,
+        e.adresse_mail AS employe_email,
+        e.mail_responsable1,
+        e.mail_responsable2
+      FROM demande_rh d
+      JOIN employees e ON d.employe_id = e.id
+      ORDER BY d.created_at DESC
+    `);
+
+    const demandes = result.rows;
+
+    // Préparer les données pour Excel
+    const excelData = demandes.map(demande => {
+      // Formater les dates
+      const formatDate = (date) => {
+        if (!date) return '';
+        return new Date(date).toLocaleDateString('fr-FR');
+      };
+
+      // Formater le statut
+      const getStatutLabel = (statut) => {
+        const statuts = {
+          'en_attente': 'En attente',
+          'approuve': 'Approuvé',
+          'refuse': 'Refusé'
+        };
+        return statuts[statut] || statut;
+      };
+
+      // Formater le type de demande
+      const getTypeDemandeLabel = (type) => {
+        const types = {
+          'conges': 'Congé',
+          'autorisation': 'Autorisation',
+          'mission': 'Mission'
+        };
+        return types[type] || type;
+      };
+
+      // Formater le type de congé
+      const getTypeCongeLabel = (type, autre) => {
+        if (type === 'annuel') return 'Congé annuel';
+        if (type === 'sans_solde') return 'Congé sans solde';
+        if (type === 'autre') return `Autre (${autre || ''})`;
+        return type || '';
+      };
+
+      // Formater l'approbation R1
+      const getApprovalR1 = (approuve) => {
+        if (approuve === true) return 'Approuvé';
+        if (approuve === false) return 'Refusé';
+        return 'En attente';
+      };
+
+      // Formater l'approbation R2
+      const getApprovalR2 = (approuve) => {
+        if (approuve === true) return 'Approuvé';
+        if (approuve === false) return 'Refusé';
+        return demande.mail_responsable2 ? 'En attente' : 'Non applicable';
+      };
+
+      return {
+        'ID': demande.id,
+        'Matricule': demande.matricule || '',
+        'Employé': `${demande.employe_prenom} ${demande.employe_nom}`,
+        'Poste': demande.employe_poste || '',
+        'Email employé': demande.employe_email || '',
+        'Type demande': getTypeDemandeLabel(demande.type_demande),
+        'Titre/Motif': demande.titre || '',
+        'Date départ': formatDate(demande.date_depart),
+        'Date retour': formatDate(demande.date_retour),
+        'Heure départ': demande.heure_depart || '',
+        'Heure retour': demande.heure_retour || '',
+        'Demi-journée': demande.demi_journee ? 'Oui' : 'Non',
+        'Type congé': getTypeCongeLabel(demande.type_conge, demande.type_conge_autre),
+        'Frais déplacement': demande.frais_deplacement ? `${demande.frais_deplacement} TND` : '',
+        'Statut': getStatutLabel(demande.statut),
+        'Responsable 1': demande.mail_responsable1 || '',
+        'Approbation R1': getApprovalR1(demande.approuve_responsable1),
+        'Responsable 2': demande.mail_responsable2 || '',
+        'Approbation R2': getApprovalR2(demande.approuve_responsable2),
+        'Commentaire refus': demande.commentaire_refus || '',
+        'Date création': formatDate(demande.created_at),
+        'Date mise à jour': formatDate(demande.updated_at)
+      };
+    });
+
+    // Créer un nouveau classeur
+    const wb = XLSX.utils.book_new();
+
+    // Créer une feuille avec les données
+    const ws = XLSX.utils.json_to_sheet(excelData);
+
+    // Définir les largeurs de colonnes
+    const colWidths = [
+      { wch: 8 },   // ID
+      { wch: 12 },  // Matricule
+      { wch: 25 },  // Employé
+      { wch: 25 },  // Poste
+      { wch: 30 },  // Email employé
+      { wch: 15 },  // Type demande
+      { wch: 40 },  // Titre/Motif
+      { wch: 15 },  // Date départ
+      { wch: 15 },  // Date retour
+      { wch: 12 },  // Heure départ
+      { wch: 12 },  // Heure retour
+      { wch: 12 },  // Demi-journée
+      { wch: 20 },  // Type congé
+      { wch: 15 },  // Frais déplacement
+      { wch: 12 },  // Statut
+      { wch: 30 },  // Responsable 1
+      { wch: 12 },  // Approbation R1
+      { wch: 30 },  // Responsable 2
+      { wch: 12 },  // Approbation R2
+      { wch: 40 },  // Commentaire refus
+      { wch: 15 },  // Date création
+      { wch: 15 }   // Date mise à jour
+    ];
+    ws['!cols'] = colWidths;
+
+    // Ajouter la feuille au classeur
+    XLSX.utils.book_append_sheet(wb, ws, 'Demandes RH');
+
+    // Générer le buffer Excel
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Définir les headers pour le téléchargement
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `demandes_rh_${date}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(excelBuffer);
+
+  } catch (err) {
+    console.error('Erreur lors de l\'export Excel:', err);
+    res.status(500).json({ error: 'Erreur lors de l\'export Excel' });
+  }
+});
+
 // Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
@@ -885,4 +1052,5 @@ app.listen(PORT, () => {
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
+  console.log(`📊 Export Excel: http://localhost:${PORT}/api/demandes/export/excel`);
 });
