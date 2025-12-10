@@ -180,7 +180,7 @@ app.post('/api/demandes/attestation-travail', async (req, res) => {
     // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
-              date_embauche, cin, date_naissance,
+              date_debut, cin, date_naissance,
               mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
       [employe_id]
