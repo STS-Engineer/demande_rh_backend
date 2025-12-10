@@ -2,6 +2,9 @@ const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -53,10 +56,21 @@ function extraireNomPrenomDepuisEmail(email) {
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
-  // Exemple : "Thu Nov 27 2025"
+  if (Number.isNaN(d.getTime())) return date;
   return d.toDateString();
-  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
+}
+
+// Helper : formatage date FR (JJ/MM/YYYY)
+function formatDateFR(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return date;
+  
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const year = d.getFullYear();
+  
+  return `${day}/${month}/${year}`;
 }
 
 // Helper : label type de congé
@@ -69,6 +83,181 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   }
   return type_conge;
 }
+
+// Fonction pour générer PDF d'attestation de travail
+async function genererAttestationTravailPDF(employe, dateDebut) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margins: { top: 50, bottom: 50, left: 50, right: 50 }
+      });
+
+      const buffers = [];
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => {
+        const pdfData = Buffer.concat(buffers);
+        resolve(pdfData);
+      });
+
+      // Police et styles
+      const titleFontSize = 16;
+      const normalFontSize = 12;
+      const smallFontSize = 10;
+      
+      // Titre
+      doc.fontSize(titleFontSize).font('Helvetica-Bold')
+         .text('ATTESTATION DE TRAVAIL', { align: 'center' });
+      
+      doc.moveDown(2);
+
+      // Contenu du template
+      doc.fontSize(normalFontSize).font('Helvetica')
+         .text('Je soussigné, ............................................., Directeur', { continued: false });
+      
+      doc.font('Helvetica-Bold')
+         .text('SAME Tunisie Service', { align: 'center' });
+      
+      doc.font('Helvetica')
+         .text('filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif 2050- TUNISIE', { align: 'center' })
+         .text('atteste que', { align: 'center' });
+      
+      doc.moveDown(1);
+      
+      // Informations de l'employé
+      doc.font('Helvetica-Bold')
+         .text(`${employe.prenom} ${employe.nom}`, { align: 'center' });
+      
+      doc.font('Helvetica')
+         .text(`née le ${formatDateFR(employe.date_naissance || '')},`, { align: 'center' })
+         .text(`titulaire de la CIN N° : ${employe.cin || '........................'}`, { align: 'center' })
+         .text(`est salariée titulaire depuis le ${formatDateFR(dateDebut)} en qualité de :`, { align: 'center' });
+      
+      doc.moveDown(1);
+      
+      // Poste
+      doc.font('Helvetica-Bold')
+         .text(`- ${employe.poste} -`, { align: 'center' });
+      
+      doc.moveDown(2);
+      
+      // Footer
+      doc.font('Helvetica')
+         .text('En foi de quoi la présente attestation est délivrée pour servir et', { align: 'center' })
+         .text('valoir ce que de droit.', { align: 'center' });
+      
+      doc.moveDown(2);
+      
+      doc.text('Fait à H.Lif,', { align: 'right' });
+      doc.moveDown(1);
+      
+      // Date et signature
+      doc.text(`Le ${formatDateFR(new Date())}`, { align: 'right' });
+      doc.moveDown(3);
+      
+      doc.font('Helvetica-Bold')
+         .text('Directeur SAME Tunisie Service', { align: 'right' });
+      
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// Nouvelle route pour demander une attestation de travail
+app.post('/api/demandes/attestation-travail', async (req, res) => {
+  const { employe_id } = req.body;
+
+  try {
+    // Validation
+    if (!employe_id) {
+      return res.status(400).json({ 
+        error: 'Veuillez sélectionner un employé' 
+      });
+    }
+
+    // Récupérer les informations de l'employé
+    const employeResult = await pool.query(
+      `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
+              date_embauche, cin, date_naissance,
+              mail_responsable1, mail_responsable2
+       FROM employees WHERE id = $1`,
+      [employe_id]
+    );
+
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
+
+    const employe = employeResult.rows[0];
+    const dateDebut = employe.date_embauche || new Date();
+
+    // Générer le PDF d'attestation
+    const pdfBuffer = await genererAttestationTravailPDF(employe, dateDebut);
+
+    // Envoyer l'email avec le PDF en pièce jointe
+    const mailOptions = {
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: 'majed.messai@avocarbon.com',
+      subject: `Attestation de travail - ${employe.nom} ${employe.prenom}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #2563eb;">📄 Attestation de Travail Générée</h2>
+          <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
+            <p><strong>Poste:</strong> ${employe.poste}</p>
+            <p><strong>Matricule:</strong> ${employe.matricule || 'N/A'}</p>
+            <p><strong>Date de génération:</strong> ${new Date().toLocaleDateString('fr-FR')}</p>
+          </div>
+          <p>Veuillez trouver en pièce jointe l'attestation de travail générée automatiquement.</p>
+        </div>
+      `,
+      attachments: [
+        {
+          filename: `Attestation_Travail_${employe.nom}_${employe.prenom}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf'
+        }
+      ]
+    };
+
+    // Envoyer l'email
+    await transporter.sendMail(mailOptions);
+
+    // Créer un enregistrement dans la table demande_rh (optionnel)
+    const insertResult = await pool.query(
+      `INSERT INTO demande_rh 
+       (employe_id, type_demande, titre, date_depart, statut)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [
+        employe_id,
+        'attestation_travail',
+        'Demande d\'attestation de travail',
+        new Date(),
+        'approuve' // Directement approuvé car automatique
+      ]
+    );
+
+    console.log(`Attestation générée pour ${employe.nom} ${employe.prenom}, email envoyé à majed.messai@avocarbon.com`);
+
+    res.json({ 
+      success: true, 
+      message: 'Attestation de travail générée et envoyée avec succès',
+      demandeId: insertResult.rows[0].id
+    });
+
+  } catch (err) {
+    console.error('Erreur détaillée:', err);
+    res.status(500).json({ 
+      error: 'Erreur lors de la génération de l\'attestation: ' + err.message 
+    });
+  }
+});
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
@@ -882,6 +1071,7 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+  console.log(`📄 Route attestation: POST http://localhost:${PORT}/api/demandes/attestation-travail`);
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
