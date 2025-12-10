@@ -1,15 +1,53 @@
 const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
-const cors = require('cors');
 const PDFDocument = require('pdfkit');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// ========== CONFIGURATION CORS MANUELLE ==========
+const allowedOrigins = [
+  'https://request-rh.azurewebsites.net', // votre frontend Azure
+  'http://localhost:3000',                // React dev server
+  'http://localhost:5173',                // Vite dev server
+  'http://localhost:8080',                // Autre port possible
+  'https://hr-back.azurewebsites.net'     // Backend lui-même (pour les redirections)
+];
+
+// Middleware CORS manuel
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  // Vérifier si l'origine est autorisée
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  
+  // Headers CORS standard
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24 heures
+  
+  // Gérer les requêtes OPTIONS (preflight)
+  if (req.method === 'OPTIONS') {
+    console.log(`[CORS] Requête OPTIONS reçue de: ${origin || 'unknown origin'}`);
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
 app.use(express.json());
 
-// Configuration PostgreSQL
+// Middleware de logging pour déboguer
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} - Origin: ${req.headers.origin || 'no origin'}`);
+  next();
+});
+
+// ========== CONFIGURATION BASE DE DONNÉES ==========
 const pool = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
@@ -19,7 +57,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Configuration SMTP Outlook
+// ========== CONFIGURATION EMAIL ==========
 const transporter = nodemailer.createTransport({
   host: 'avocarbon-com.mail.protection.outlook.com',
   port: 25,
@@ -30,16 +68,13 @@ const transporter = nodemailer.createTransport({
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
 
-// Helper : extraire nom/prénom depuis l'adresse email
+// ========== FONCTIONS UTILITAIRES ==========
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
-
   const localPart = email.split('@')[0];
   const rawParts = localPart.split(/[._-]+/).filter(Boolean);
-
   const capitalize = (str) =>
     str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
-
   if (rawParts.length >= 2) {
     const prenom = capitalize(rawParts[0]);
     const nom = capitalize(rawParts[1]);
@@ -50,16 +85,13 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
-// Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
-  // Exemple : "Thu Nov 27 2025"
+  if (Number.isNaN(d.getTime())) return date;
   return d.toDateString();
 }
 
-// Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
   if (type_conge === 'annuel') return 'Congé annuel';
@@ -130,7 +162,9 @@ async function genererPDFDemission(employe, motifDemission) {
   });
 }
 
-// Récupérer tous les employés actifs (sans date de départ)
+// ========== ROUTES API ==========
+
+// Récupérer tous les employés actifs
 app.get('/api/employees/actifs', async (req, res) => {
   try {
     const result = await pool.query(
@@ -755,7 +789,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande (avec noms des responsables dans les mails)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -894,7 +928,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande (avec nom du responsable qui refuse) - CORRIGÉ
+// Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -919,7 +953,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // CORRECTION : Mettre à jour le champ approuve_responsable à FALSE selon le niveau
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
@@ -996,19 +1029,43 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
   }
 });
 
+// Route de test CORS
+app.get('/api/test-cors', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'CORS fonctionne correctement',
+    origin: req.headers.origin,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    cors: 'CORS manuel activé',
+    allowedOrigins: allowedOrigins
+  });
+});
+
+// Route 404
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Route non trouvée',
+    path: req.originalUrl,
+    method: req.method
   });
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+  console.log(`✅ CORS manuel activé pour les origines:`);
+  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
+  console.log(`🧪 Test CORS: http://localhost:${PORT}/api/test-cors`);
 });
