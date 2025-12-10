@@ -1,53 +1,14 @@
 const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
-const PDFDocument = require('pdfkit');
+const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-
-// ========== CONFIGURATION CORS MANUELLE ==========
-const allowedOrigins = [
-  'https://request-rh.azurewebsites.net', // votre frontend Azure
-  'http://localhost:3000',                // React dev server
-  'http://localhost:5173',                // Vite dev server
-  'http://localhost:8080',                // Autre port possible
-  'https://hr-back.azurewebsites.net'     // Backend lui-même (pour les redirections)
-];
-
-// Middleware CORS manuel
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  // Vérifier si l'origine est autorisée
-  if (allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-  
-  // Headers CORS standard
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Max-Age', '86400'); // 24 heures
-  
-  // Gérer les requêtes OPTIONS (preflight)
-  if (req.method === 'OPTIONS') {
-    console.log(`[CORS] Requête OPTIONS reçue de: ${origin || 'unknown origin'}`);
-    return res.status(200).end();
-  }
-  
-  next();
-});
-
+app.use(cors());
 app.use(express.json());
 
-// Middleware de logging pour déboguer
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} - Origin: ${req.headers.origin || 'no origin'}`);
-  next();
-});
-
-// ========== CONFIGURATION BASE DE DONNÉES ==========
+// Configuration PostgreSQL
 const pool = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
@@ -57,7 +18,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ========== CONFIGURATION EMAIL ==========
+// Configuration SMTP Outlook
 const transporter = nodemailer.createTransport({
   host: 'avocarbon-com.mail.protection.outlook.com',
   port: 25,
@@ -68,13 +29,16 @@ const transporter = nodemailer.createTransport({
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
 
-// ========== FONCTIONS UTILITAIRES ==========
+// Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
+
   const localPart = email.split('@')[0];
   const rawParts = localPart.split(/[._-]+/).filter(Boolean);
+
   const capitalize = (str) =>
     str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
+
   if (rawParts.length >= 2) {
     const prenom = capitalize(rawParts[0]);
     const nom = capitalize(rawParts[1]);
@@ -85,13 +49,17 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+// Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date;
+  if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
+  // Exemple : "Thu Nov 27 2025"
   return d.toDateString();
+  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
 }
 
+// Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
   if (type_conge === 'annuel') return 'Congé annuel';
@@ -102,69 +70,7 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-// Fonction pour générer le PDF de démission
-async function genererPDFDemission(employe, motifDemission) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
-    const chunks = [];
-    
-    doc.on('data', chunk => chunks.push(chunk));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
-
-    // En-tête
-    doc.fontSize(20).font('Helvetica-Bold').text('Lettre de Démission', { align: 'center' });
-    doc.moveDown(2);
-
-    // Informations employé
-    doc.fontSize(12).font('Helvetica');
-    doc.text('Informations employé:', { underline: true });
-    doc.moveDown(0.5);
-    
-    doc.text(`Nom : ${employe.nom} ${employe.prenom}`);
-    doc.text(`Poste : ${employe.poste}`);
-    doc.text(`Date de soumission : ${new Date().toLocaleDateString('fr-FR')}`);
-    doc.moveDown();
-
-    // Motif de démission
-    doc.text('Motif de démission:', { underline: true });
-    doc.moveDown(0.5);
-    doc.text(motifDemission || 'Non spécifié', {
-      width: 500,
-      align: 'justify'
-    });
-    doc.moveDown(2);
-
-    // Déclaration
-    doc.font('Helvetica-Bold').text('Déclaration:', { underline: true });
-    doc.moveDown(0.5);
-    doc.font('Helvetica');
-    doc.text(`Je soussigné(e) ${employe.nom} ${employe.prenom}, occupant le poste de ${employe.poste},`);
-    doc.text('déclare par la présente renoncer à mon poste et souhaite mettre fin à mon contrat de travail.');
-    doc.text('Je m\'engage à respecter mon préavis et les formalités administratives nécessaires.');
-    doc.moveDown(2);
-
-    // Signature
-    doc.text('Fait à Tunis, le ' + new Date().toLocaleDateString('fr-FR'));
-    doc.moveDown(3);
-    doc.text('Signature:');
-    doc.moveDown(0.5);
-    doc.text('__________________________');
-    doc.moveDown(2);
-
-    // Pied de page
-    doc.fontSize(10).font('Helvetica-Oblique').text(
-      'Document généré automatiquement par le système RH AvoCarbon',
-      { align: 'center' }
-    );
-
-    doc.end();
-  });
-}
-
-// ========== ROUTES API ==========
-
-// Récupérer tous les employés actifs
+// Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
   try {
     const result = await pool.query(
@@ -199,16 +105,9 @@ app.post('/api/demandes', async (req, res) => {
 
   try {
     // Validation des champs obligatoires
-    if (!employe_id || !type_demande || !titre) {
+    if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({ 
-        error: 'Les champs employé, type de demande et motif sont obligatoires' 
-      });
-    }
-
-    // Pour les démissions, la date de départ n'est pas obligatoire
-    if (type_demande !== 'demission' && !date_depart) {
-      return res.status(400).json({ 
-        error: 'Le champ date de départ est obligatoire pour ce type de demande' 
+        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
       });
     }
 
@@ -226,7 +125,6 @@ app.post('/api/demandes', async (req, res) => {
     const employe = employeResult.rows[0];
 
     // Convertir les chaînes vides en null pour les champs optionnels
-    const dateDepartFinal = type_demande === 'demission' ? new Date() : date_depart;
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
@@ -245,7 +143,7 @@ app.post('/api/demandes', async (req, res) => {
         employe_id, 
         type_demande, 
         titre, 
-        dateDepartFinal, 
+        date_depart, 
         dateRetourFinal,
         heureDepartFinal, 
         heureRetourFinal, 
@@ -269,7 +167,7 @@ app.post('/api/demandes', async (req, res) => {
         { 
           type_demande, 
           titre, 
-          date_depart: dateDepartFinal, 
+          date_depart, 
           date_retour: dateRetourFinal, 
           heure_depart: heureDepartFinal, 
           heure_retour: heureRetourFinal, 
@@ -279,53 +177,6 @@ app.post('/api/demandes', async (req, res) => {
           frais_deplacement: fraisDeplacementFinal 
         }
       );
-    }
-
-    // Pour les démissions, envoyer automatiquement un email à majed.messai@avocarbon.com avec le PDF
-    if (type_demande === 'demission') {
-      try {
-        // Générer le PDF
-        const pdfBuffer = await genererPDFDemission(employe, titre);
-        
-        // Envoyer email avec PDF attaché
-        await transporter.sendMail({
-          from: {
-            name: 'Système RH AvoCarbon',
-            address: 'administration.STS@avocarbon.com'
-          },
-          to: 'majed.messai@avocarbon.com',
-          cc: employe.adresse_mail,
-          subject: `Démission - ${employe.nom} ${employe.prenom}`,
-          text: `Une nouvelle démission a été soumise par ${employe.nom} ${employe.prenom} (${employe.poste}).\n\nMotif : ${titre}\n\nVeuillez trouver en pièce jointe la lettre de démission formelle.`,
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-              <h2 style="color: #dc2626;">📄 Notification de Démission</h2>
-              <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                <p><strong>Une nouvelle démission a été soumise :</strong></p>
-                <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
-                <p><strong>Poste:</strong> ${employe.poste}</p>
-                <p><strong>Date de soumission:</strong> ${new Date().toLocaleDateString('fr-FR')}</p>
-                <p><strong>Motif de démission:</strong> ${titre}</p>
-              </div>
-              <p>Veuillez trouver en pièce jointe la lettre de démission formelle générée automatiquement.</p>
-              <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
-                Ceci est une notification automatique du système RH AvoCarbon.
-              </p>
-            </div>
-          `,
-          attachments: [
-            {
-              filename: `Démission_${employe.nom}_${employe.prenom}.pdf`,
-              content: pdfBuffer,
-              contentType: 'application/pdf'
-            }
-          ]
-        });
-
-        console.log(`Email avec PDF envoyé à majed.messai@avocarbon.com pour la démission ${demandeId}`);
-      } catch (emailError) {
-        console.error('Erreur lors de l\'envoi de l\'email de démission:', emailError);
-      }
     }
 
     res.json({ 
@@ -345,37 +196,28 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
   let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
-                  details.type_demande === 'autorisation' ? 'Autorisation' : 
-                  details.type_demande === 'mission' ? 'Mission' : 
-                  details.type_demande === 'demission' ? 'Démission' : 'Demande RH';
+                  details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
   
   let detailsHtml = `
     <p><strong>Type:</strong> ${typeLabel}</p>
     <p><strong>Motif:</strong> ${details.titre}</p>
+    <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
   `;
 
-  if (details.type_demande === 'demission') {
+  if (details.type_demande === 'conges') {
+    const typeCongeLabel = getTypeCongeLabel(details.type_conge, details.type_conge_autre);
     detailsHtml += `
-      <p><strong>Date de notification:</strong> ${formatDateShort(details.date_depart)}</p>
-      <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
-      <p><strong>Poste:</strong> ${employe.poste}</p>
-    `;
-  } else if (details.type_demande === 'conges') {
-    detailsHtml += `
-      <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Demi-journée:</strong> ${details.demi_journee ? 'Oui' : 'Non'}</p>
-      <p><strong>Type de congé:</strong> ${getTypeCongeLabel(details.type_conge, details.type_conge_autre)}</p>
+      <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
     `;
   } else if (details.type_demande === 'autorisation') {
     detailsHtml += `
-      <p><strong>Date:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Heure de départ:</strong> ${details.heure_depart || 'Non spécifié'}</p>
       <p><strong>Heure d'arrivée:</strong> ${details.heure_retour || 'Non spécifié'}</p>
     `;
   } else if (details.type_demande === 'mission') {
     detailsHtml += `
-      <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Heure de sortie:</strong> ${details.heure_depart || 'Non spécifié'}</p>
       <p><strong>Heure de retour:</strong> ${details.heure_retour || 'Non spécifié'}</p>
@@ -480,9 +322,7 @@ app.get('/approuver-demande', async (req, res) => {
       ? 'Congé'
       : demande.type_demande === 'autorisation'
         ? 'Autorisation'
-        : demande.type_demande === 'mission'
-          ? 'Mission'
-          : 'Démission';
+        : 'Mission';
 
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
@@ -789,7 +629,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande
+// Approuver une demande (avec noms des responsables dans les mails)
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -928,7 +768,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande
+// Refuser une demande (avec nom du responsable qui refuse) - CORRIGÉ
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -953,6 +793,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
+    // CORRECTION : Mettre à jour le champ approuve_responsable à FALSE selon le niveau
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
@@ -1029,43 +870,19 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
   }
 });
 
-// Route de test CORS
-app.get('/api/test-cors', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'CORS fonctionne correctement',
-    origin: req.headers.origin,
-    timestamp: new Date().toISOString()
-  });
-});
-
 // Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
-    timestamp: new Date().toISOString(),
-    cors: 'CORS manuel activé',
-    allowedOrigins: allowedOrigins
-  });
-});
-
-// Route 404
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Route non trouvée',
-    path: req.originalUrl,
-    method: req.method
+    timestamp: new Date().toISOString()
   });
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  console.log(`✅ CORS manuel activé pour les origines:`);
-  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
-  console.log(`🧪 Test CORS: http://localhost:${PORT}/api/test-cors`);
 });
