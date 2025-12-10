@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const PDFDocument = require('pdfkit');
 require('dotenv').config();
 
 const app = express();
@@ -56,7 +57,6 @@ function formatDateShort(date) {
   if (Number.isNaN(d.getTime())) return date; // si ce n'est pas une vraie date, on renvoie la valeur brute
   // Exemple : "Thu Nov 27 2025"
   return d.toDateString();
-  // Si tu préfères en FR : return d.toLocaleDateString('fr-FR');
 }
 
 // Helper : label type de congé
@@ -68,6 +68,66 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
     return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
   }
   return type_conge;
+}
+
+// Fonction pour générer le PDF de démission
+async function genererPDFDemission(employe, motifDemission) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const chunks = [];
+    
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    // En-tête
+    doc.fontSize(20).font('Helvetica-Bold').text('Lettre de Démission', { align: 'center' });
+    doc.moveDown(2);
+
+    // Informations employé
+    doc.fontSize(12).font('Helvetica');
+    doc.text('Informations employé:', { underline: true });
+    doc.moveDown(0.5);
+    
+    doc.text(`Nom : ${employe.nom} ${employe.prenom}`);
+    doc.text(`Poste : ${employe.poste}`);
+    doc.text(`Date de soumission : ${new Date().toLocaleDateString('fr-FR')}`);
+    doc.moveDown();
+
+    // Motif de démission
+    doc.text('Motif de démission:', { underline: true });
+    doc.moveDown(0.5);
+    doc.text(motifDemission || 'Non spécifié', {
+      width: 500,
+      align: 'justify'
+    });
+    doc.moveDown(2);
+
+    // Déclaration
+    doc.font('Helvetica-Bold').text('Déclaration:', { underline: true });
+    doc.moveDown(0.5);
+    doc.font('Helvetica');
+    doc.text(`Je soussigné(e) ${employe.nom} ${employe.prenom}, occupant le poste de ${employe.poste},`);
+    doc.text('déclare par la présente renoncer à mon poste et souhaite mettre fin à mon contrat de travail.');
+    doc.text('Je m\'engage à respecter mon préavis et les formalités administratives nécessaires.');
+    doc.moveDown(2);
+
+    // Signature
+    doc.text('Fait à Tunis, le ' + new Date().toLocaleDateString('fr-FR'));
+    doc.moveDown(3);
+    doc.text('Signature:');
+    doc.moveDown(0.5);
+    doc.text('__________________________');
+    doc.moveDown(2);
+
+    // Pied de page
+    doc.fontSize(10).font('Helvetica-Oblique').text(
+      'Document généré automatiquement par le système RH AvoCarbon',
+      { align: 'center' }
+    );
+
+    doc.end();
+  });
 }
 
 // Récupérer tous les employés actifs (sans date de départ)
@@ -105,9 +165,16 @@ app.post('/api/demandes', async (req, res) => {
 
   try {
     // Validation des champs obligatoires
-    if (!employe_id || !type_demande || !titre || !date_depart) {
+    if (!employe_id || !type_demande || !titre) {
       return res.status(400).json({ 
-        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
+        error: 'Les champs employé, type de demande et motif sont obligatoires' 
+      });
+    }
+
+    // Pour les démissions, la date de départ n'est pas obligatoire
+    if (type_demande !== 'demission' && !date_depart) {
+      return res.status(400).json({ 
+        error: 'Le champ date de départ est obligatoire pour ce type de demande' 
       });
     }
 
@@ -125,6 +192,7 @@ app.post('/api/demandes', async (req, res) => {
     const employe = employeResult.rows[0];
 
     // Convertir les chaînes vides en null pour les champs optionnels
+    const dateDepartFinal = type_demande === 'demission' ? new Date() : date_depart;
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
@@ -143,7 +211,7 @@ app.post('/api/demandes', async (req, res) => {
         employe_id, 
         type_demande, 
         titre, 
-        date_depart, 
+        dateDepartFinal, 
         dateRetourFinal,
         heureDepartFinal, 
         heureRetourFinal, 
@@ -167,7 +235,7 @@ app.post('/api/demandes', async (req, res) => {
         { 
           type_demande, 
           titre, 
-          date_depart, 
+          date_depart: dateDepartFinal, 
           date_retour: dateRetourFinal, 
           heure_depart: heureDepartFinal, 
           heure_retour: heureRetourFinal, 
@@ -177,6 +245,53 @@ app.post('/api/demandes', async (req, res) => {
           frais_deplacement: fraisDeplacementFinal 
         }
       );
+    }
+
+    // Pour les démissions, envoyer automatiquement un email à majed.messai@avocarbon.com avec le PDF
+    if (type_demande === 'demission') {
+      try {
+        // Générer le PDF
+        const pdfBuffer = await genererPDFDemission(employe, titre);
+        
+        // Envoyer email avec PDF attaché
+        await transporter.sendMail({
+          from: {
+            name: 'Système RH AvoCarbon',
+            address: 'administration.STS@avocarbon.com'
+          },
+          to: 'majed.messai@avocarbon.com',
+          cc: employe.adresse_mail,
+          subject: `Démission - ${employe.nom} ${employe.prenom}`,
+          text: `Une nouvelle démission a été soumise par ${employe.nom} ${employe.prenom} (${employe.poste}).\n\nMotif : ${titre}\n\nVeuillez trouver en pièce jointe la lettre de démission formelle.`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #dc2626;">📄 Notification de Démission</h2>
+              <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <p><strong>Une nouvelle démission a été soumise :</strong></p>
+                <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
+                <p><strong>Poste:</strong> ${employe.poste}</p>
+                <p><strong>Date de soumission:</strong> ${new Date().toLocaleDateString('fr-FR')}</p>
+                <p><strong>Motif de démission:</strong> ${titre}</p>
+              </div>
+              <p>Veuillez trouver en pièce jointe la lettre de démission formelle générée automatiquement.</p>
+              <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+                Ceci est une notification automatique du système RH AvoCarbon.
+              </p>
+            </div>
+          `,
+          attachments: [
+            {
+              filename: `Démission_${employe.nom}_${employe.prenom}.pdf`,
+              content: pdfBuffer,
+              contentType: 'application/pdf'
+            }
+          ]
+        });
+
+        console.log(`Email avec PDF envoyé à majed.messai@avocarbon.com pour la démission ${demandeId}`);
+      } catch (emailError) {
+        console.error('Erreur lors de l\'envoi de l\'email de démission:', emailError);
+      }
     }
 
     res.json({ 
@@ -196,28 +311,37 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
   let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
-                  details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
+                  details.type_demande === 'autorisation' ? 'Autorisation' : 
+                  details.type_demande === 'mission' ? 'Mission' : 
+                  details.type_demande === 'demission' ? 'Démission' : 'Demande RH';
   
   let detailsHtml = `
     <p><strong>Type:</strong> ${typeLabel}</p>
     <p><strong>Motif:</strong> ${details.titre}</p>
-    <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
   `;
 
-  if (details.type_demande === 'conges') {
-    const typeCongeLabel = getTypeCongeLabel(details.type_conge, details.type_conge_autre);
+  if (details.type_demande === 'demission') {
     detailsHtml += `
+      <p><strong>Date de notification:</strong> ${formatDateShort(details.date_depart)}</p>
+      <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
+      <p><strong>Poste:</strong> ${employe.poste}</p>
+    `;
+  } else if (details.type_demande === 'conges') {
+    detailsHtml += `
+      <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Demi-journée:</strong> ${details.demi_journee ? 'Oui' : 'Non'}</p>
-      <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
+      <p><strong>Type de congé:</strong> ${getTypeCongeLabel(details.type_conge, details.type_conge_autre)}</p>
     `;
   } else if (details.type_demande === 'autorisation') {
     detailsHtml += `
+      <p><strong>Date:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Heure de départ:</strong> ${details.heure_depart || 'Non spécifié'}</p>
       <p><strong>Heure d'arrivée:</strong> ${details.heure_retour || 'Non spécifié'}</p>
     `;
   } else if (details.type_demande === 'mission') {
     detailsHtml += `
+      <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
       <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Heure de sortie:</strong> ${details.heure_depart || 'Non spécifié'}</p>
       <p><strong>Heure de retour:</strong> ${details.heure_retour || 'Non spécifié'}</p>
@@ -322,7 +446,9 @@ app.get('/approuver-demande', async (req, res) => {
       ? 'Congé'
       : demande.type_demande === 'autorisation'
         ? 'Autorisation'
-        : 'Mission';
+        : demande.type_demande === 'mission'
+          ? 'Mission'
+          : 'Démission';
 
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
