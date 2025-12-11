@@ -4,44 +4,11 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
-const libreoffice = require('libreoffice-convert');
-const util = require('util');
-const { exec } = require('child_process');
 const createReport = require('docx-templates').default;
 require('dotenv').config();
 
 const app = express();
-
-// Configuration CORS manuelle
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Liste des origines autorisées
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'https://votre-frontend.azurewebsites.net',
-      // Ajoutez d'autres origines au besoin
-    ];
-    
-    // En développement, autoriser toutes les origines
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    // En production, vérifier l'origine
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Pour les pré-requêtes OPTIONS
+app.use(cors());
 app.use(express.json());
 
 // Configuration PostgreSQL
@@ -67,10 +34,6 @@ const BASE_URL = 'https://hr-back.azurewebsites.net';
 
 // Chemin vers le template Word
 const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
-
-// Convertir libreoffice.convert en promesse
-const libreofficeConvert = util.promisify(libreoffice.convert);
-const execAsync = util.promisify(exec);
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -175,152 +138,6 @@ async function genererAttestationWord(employe) {
   }
 }
 
-// Fonction pour vérifier si LibreOffice est installé
-async function verifierLibreOffice() {
-  try {
-    // Essayer de trouver soffice (LibreOffice) dans différents chemins
-    const paths = [
-      '/usr/bin/soffice',
-      '/usr/local/bin/soffice',
-      '/opt/libreoffice/program/soffice',
-      'soffice', // Essayer dans le PATH
-      'libreoffice', // Alternative
-    ];
-    
-    for (const binPath of paths) {
-      try {
-        const { stdout } = await execAsync(`${binPath} --version`);
-        console.log(`LibreOffice trouvé: ${binPath}`);
-        console.log(`Version: ${stdout.trim()}`);
-        return { installed: true, path: binPath, version: stdout.trim() };
-      } catch (error) {
-        continue; // Essayer le chemin suivant
-      }
-    }
-    
-    return { installed: false, path: null, version: null };
-  } catch (error) {
-    console.error('Erreur lors de la vérification de LibreOffice:', error);
-    return { installed: false, path: null, version: null };
-  }
-}
-
-// Fonction pour convertir un fichier Word en PDF avec méthode directe (sans libreoffice-convert)
-async function convertirWordEnPDFDirect(wordBuffer, nomFichier) {
-  try {
-    console.log('Tentative de conversion directe avec LibreOffice...');
-    
-    // Créer un fichier temporaire
-    const tempDir = path.join(__dirname, 'temp');
-    await fs.mkdir(tempDir, { recursive: true });
-    
-    const tempWordPath = path.join(tempDir, `${Date.now()}_${nomFichier}`);
-    const tempPdfPath = path.join(tempDir, `${Date.now()}_${nomFichier.replace('.docx', '.pdf')}`);
-    
-    // Écrire le buffer Word dans un fichier temporaire
-    await fs.writeFile(tempWordPath, wordBuffer);
-    
-    // Essayer différentes commandes LibreOffice
-    const commands = [
-      `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempWordPath}"`,
-      `soffice --headless --convert-to pdf --outdir "${tempDir}" "${tempWordPath}"`,
-      `/usr/bin/libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempWordPath}"`,
-      `/usr/bin/soffice --headless --convert-to pdf --outdir "${tempDir}" "${tempWordPath}"`,
-    ];
-    
-    let conversionSuccess = false;
-    let pdfBuffer = null;
-    
-    for (const command of commands) {
-      try {
-        console.log(`Essai de commande: ${command}`);
-        const { stdout, stderr } = await execAsync(command);
-        
-        if (stderr) {
-          console.warn('Avertissement LibreOffice:', stderr);
-        }
-        
-        console.log('LibreOffice stdout:', stdout);
-        
-        // Vérifier si le fichier PDF a été créé
-        try {
-          pdfBuffer = await fs.readFile(tempPdfPath);
-          conversionSuccess = true;
-          console.log(`Conversion réussie avec commande: ${command}`);
-          break;
-        } catch (error) {
-          // Chercher le fichier PDF généré (peut avoir un nom différent)
-          const files = await fs.readdir(tempDir);
-          const pdfFile = files.find(f => f.endsWith('.pdf') && f.includes(nomFichier.replace('.docx', '')));
-          
-          if (pdfFile) {
-            const actualPdfPath = path.join(tempDir, pdfFile);
-            pdfBuffer = await fs.readFile(actualPdfPath);
-            conversionSuccess = true;
-            
-            // Nettoyer le fichier temporaire
-            try { await fs.unlink(actualPdfPath); } catch {}
-            
-            console.log(`Conversion réussie, fichier trouvé: ${pdfFile}`);
-            break;
-          }
-        }
-      } catch (error) {
-        console.log(`Commande échouée: ${command} - ${error.message}`);
-        continue;
-      }
-    }
-    
-    // Nettoyer les fichiers temporaires
-    try { await fs.unlink(tempWordPath); } catch {}
-    try { 
-      if (await fs.access(tempPdfPath).then(() => true).catch(() => false)) {
-        await fs.unlink(tempPdfPath); 
-      }
-    } catch {}
-    
-    if (!conversionSuccess || !pdfBuffer) {
-      throw new Error('Aucune méthode de conversion n\'a fonctionné');
-    }
-    
-    console.log(`Conversion directe réussie, taille du PDF: ${pdfBuffer.length} bytes`);
-    return pdfBuffer;
-    
-  } catch (error) {
-    console.error('Erreur lors de la conversion directe:', error);
-    throw new Error(`Échec de la conversion directe: ${error.message}`);
-  }
-}
-
-// Fonction pour convertir un fichier Word en PDF (méthode hybride)
-async function convertirWordEnPDF(wordBuffer, nomFichier = 'attestation.docx') {
-  try {
-    console.log('Début de la conversion Word -> PDF...');
-    
-    // Essayer d'abord avec libreoffice-convert
-    try {
-      console.log('Tentative avec libreoffice-convert...');
-      const pdfBuffer = await libreofficeConvert(wordBuffer, '.pdf', undefined);
-      console.log('Conversion réussie avec libreoffice-convert');
-      console.log(`Taille du PDF généré: ${pdfBuffer.length} bytes`);
-      return pdfBuffer;
-    } catch (convertError) {
-      console.warn('libreoffice-convert a échoué:', convertError.message);
-      
-      // Fallback: méthode directe
-      console.log('Essai de la méthode directe...');
-      return await convertirWordEnPDFDirect(wordBuffer, nomFichier);
-    }
-    
-  } catch (error) {
-    console.error('Toutes les méthodes de conversion ont échoué:', error);
-    
-    // Dernier recours: envoyer le Word si la conversion échoue
-    console.log('Conversion PDF impossible, le document Word sera envoyé à la place');
-    throw new Error(`Conversion PDF impossible. Le document sera envoyé en format Word. Détails: ${error.message}`);
-  }
-}
-
 // ==================== ROUTES API ====================
 
 // Récupérer tous les employés actifs (sans date de départ)
@@ -341,7 +158,7 @@ app.get('/api/employees/actifs', async (req, res) => {
   }
 });
 
-// Route pour générer une attestation Word, la convertir en PDF et l'envoyer par email
+// Route pour générer une attestation Word et l'envoyer par email
 app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
@@ -369,46 +186,11 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     // Générer le document Word
     const wordBuffer = await genererAttestationWord(employe);
-    console.log(`Document Word généré: ${wordBuffer.length} bytes`);
 
-    // Noms des fichiers
-    const fileNameBase = `Attestation_Travail_${employe.nom}_${employe.prenom}`;
-    const wordFileName = `${fileNameBase}.docx`;
-    const pdfFileName = `${fileNameBase}.pdf`;
-
-    let pdfBuffer = null;
-    let conversionSuccess = false;
-    let attachments = [];
-
-    // Essayer de convertir en PDF
-    try {
-      pdfBuffer = await convertirWordEnPDF(wordBuffer, wordFileName);
-      conversionSuccess = true;
-      
-      // Ajouter le PDF en pièce jointe
-      attachments.push({
-        filename: pdfFileName,
-        content: pdfBuffer,
-        contentType: 'application/pdf'
-      });
-      
-      console.log('PDF généré avec succès');
-      
-    } catch (conversionError) {
-      console.error('Échec de la conversion PDF, envoi du Word à la place:', conversionError.message);
-      conversionSuccess = false;
-      
-      // Ajouter le Word en pièce jointe (fallback)
-      attachments.push({
-        filename: wordFileName,
-        content: wordBuffer,
-        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      });
-    }
+    // Nom du fichier
+    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
 
     // Préparer l'email
-    const formatDocument = conversionSuccess ? 'PDF' : 'Word (PDF non disponible)';
-    
     const mailOptions = {
       from: {
         name: 'Administration STS',
@@ -427,101 +209,43 @@ app.post('/api/generer-attestation', async (req, res) => {
             <p><strong>Poste:</strong> ${employe.poste || 'Non spécifié'}</p>
             <p><strong>Date d'embauche:</strong> ${formatDateFR(employe.date_debut)}</p>
             <p><strong>Type de document:</strong> ${type_document}</p>
-            <p><strong>Format:</strong> ${formatDocument}</p>
             <p><strong>Date de la demande:</strong> ${formatDateFR(new Date())}</p>
           </div>
           <p style="color: #6b7280; font-size: 14px;">
-            ${conversionSuccess 
-              ? 'L\'attestation de travail est jointe à cet email en format PDF.' 
-              : 'L\'attestation de travail est jointe en format Word (conversion PDF temporairement indisponible).'}
-          </p>
-          <p style="color: #6b7280; font-size: 12px;">
-            <em>Document généré automatiquement le ${new Date().toLocaleDateString('fr-FR')}</em>
+            L'attestation de travail est jointe à cet email en format Word (.docx).
           </p>
         </div>
       `,
-      attachments: attachments
+      attachments: [
+        {
+          filename: fileName,
+          content: wordBuffer,
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        }
+      ]
     };
 
     // Envoyer l'email
     await transporter.sendMail(mailOptions);
-    console.log(`Email envoyé avec ${conversionSuccess ? 'PDF' : 'Word'}: ${conversionSuccess ? pdfFileName : wordFileName}`);
+    
+    // NE PAS enregistrer dans la base de données demande_rh
 
     res.json({ 
       success: true, 
-      message: conversionSuccess 
-        ? 'Attestation générée, convertie en PDF et envoyée par email avec succès'
-        : 'Attestation générée et envoyée en format Word (conversion PDF échouée)',
-      fileName: conversionSuccess ? pdfFileName : wordFileName,
-      format: conversionSuccess ? 'pdf' : 'word',
-      fileSize: conversionSuccess ? pdfBuffer.length : wordBuffer.length
+      message: 'Attestation générée et envoyée par email avec succès',
+      fileName: fileName
     });
 
   } catch (err) {
     console.error('Erreur lors de la génération d\'attestation:', err);
-    
     res.status(500).json({ 
       error: 'Erreur lors de la génération de l\'attestation: ' + err.message 
     });
   }
 });
 
-// Route pour télécharger l'attestation directement en PDF (avec fallback)
-app.post('/api/telecharger-attestation-pdf', async (req, res) => {
-  const { employe_id } = req.body;
-
-  try {
-    if (!employe_id) {
-      return res.status(400).json({ error: 'ID employé requis' });
-    }
-
-    const employeResult = await pool.query(
-      `SELECT nom, prenom, poste, date_debut, date_naissance, cin
-       FROM employees WHERE id = $1`,
-      [employe_id]
-    );
-
-    if (employeResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Employé non trouvé' });
-    }
-
-    const employe = employeResult.rows[0];
-    
-    // Générer le document Word
-    const wordBuffer = await genererAttestationWord(employe);
-    
-    // Nom du fichier
-    const wordFileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
-    const pdfFileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.pdf`;
-    
-    try {
-      // Essayer de convertir en PDF
-      const pdfBuffer = await convertirWordEnPDF(wordBuffer, wordFileName);
-      
-      // Envoyer le fichier PDF en téléchargement
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${pdfFileName}"`);
-      res.setHeader('Content-Length', pdfBuffer.length);
-      res.send(pdfBuffer);
-      
-    } catch (conversionError) {
-      console.error('Conversion PDF échouée, envoi du Word:', conversionError);
-      
-      // Fallback: envoyer le Word
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.setHeader('Content-Disposition', `attachment; filename="${wordFileName}"`);
-      res.setHeader('Content-Length', wordBuffer.length);
-      res.send(wordBuffer);
-    }
-
-  } catch (error) {
-    console.error('Erreur:', error);
-    res.status(500).json({ error: 'Erreur lors de la génération du document: ' + error.message });
-  }
-});
-
-// Route pour télécharger l'attestation en Word (version originale)
-app.post('/api/telecharger-attestation-word', async (req, res) => {
+// Route pour télécharger l'attestation directement (optionnel)
+app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id } = req.body;
 
   try {
@@ -547,7 +271,6 @@ app.post('/api/telecharger-attestation-word', async (req, res) => {
     // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.setHeader('Content-Length', wordBuffer.length);
     res.send(wordBuffer);
 
   } catch (error) {
@@ -1339,113 +1062,21 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
   }
 });
 
-// Route pour vérifier l'état de LibreOffice
-app.get('/api/check-libreoffice', async (req, res) => {
-  try {
-    const status = await verifierLibreOffice();
-    
-    if (status.installed) {
-      res.json({ 
-        success: true, 
-        message: 'LibreOffice est installé et fonctionnel',
-        path: status.path,
-        version: status.version,
-        conversionAvailable: true
-      });
-    } else {
-      res.json({ 
-        success: false, 
-        message: 'LibreOffice n\'est pas installé ou non trouvé',
-        conversionAvailable: false,
-        instructions: 'Pour installer LibreOffice sur Azure: apt-get install libreoffice'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erreur lors de la vérification',
-      message: error.message
-    });
-  }
-});
-
-// Route de test de conversion
-app.get('/api/test-conversion', async (req, res) => {
-  try {
-    // Créer un document Word simple pour tester
-    const testWordBuffer = await genererAttestationWord({
-      nom: 'TEST',
-      prenom: 'Conversion',
-      poste: 'Testeur',
-      date_debut: new Date(),
-      date_naissance: null,
-      cin: 'TEST123456'
-    });
-    
-    console.log('Test de conversion - Taille du Word:', testWordBuffer.length);
-    
-    const fileName = 'test_conversion.docx';
-    
-    try {
-      // Essayer la conversion
-      const pdfBuffer = await convertirWordEnPDF(testWordBuffer, fileName);
-      
-      res.json({ 
-        success: true, 
-        message: 'Conversion Word -> PDF fonctionnelle',
-        wordSize: testWordBuffer.length,
-        pdfSize: pdfBuffer.length,
-        ratio: (pdfBuffer.length / testWordBuffer.length * 100).toFixed(2) + '%',
-        method: 'Conversion réussie'
-      });
-    } catch (conversionError) {
-      res.json({ 
-        success: false, 
-        message: 'Conversion échouée, fallback disponible',
-        wordSize: testWordBuffer.length,
-        error: conversionError.message,
-        method: 'Fallback vers Word'
-      });
-    }
-    
-  } catch (error) {
-    console.error('Erreur test conversion:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Échec du test',
-      message: error.message
-    });
-  }
-});
-
 // Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
-    timestamp: new Date().toISOString(),
-    service: 'Gestion RH avec conversion PDF'
+    timestamp: new Date().toISOString()
   });
 });
 
 const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
-  console.log(`📄 API Attestations: http://localhost:${PORT}/api/generer-attestation`);
-  console.log(`🧪 Test conversion: http://localhost:${PORT}/api/test-conversion`);
-  console.log(`🔍 Vérif LibreOffice: http://localhost:${PORT}/api/check-libreoffice`);
-  console.log(`📁 Template Word: ${TEMPLATE_PATH}`);
-  
-  // Vérifier LibreOffice au démarrage
-  const libreOfficeStatus = await verifierLibreOffice();
-  if (libreOfficeStatus.installed) {
-    console.log(`✅ LibreOffice trouvé: ${libreOfficeStatus.version}`);
-  } else {
-    console.log(`⚠️  LibreOffice non trouvé. Le fallback Word sera utilisé.`);
-    console.log(`ℹ️  Pour installer: apt-get install libreoffice`);
-  }
+  console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
+  console.log(`📁 Assurez-vous d'avoir le template Word dans: ${TEMPLATE_PATH}`);
 });
