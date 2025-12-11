@@ -33,7 +33,7 @@ const transporter = nodemailer.createTransport({
 const BASE_URL = 'https://hr-back.azurewebsites.net';
 
 // Chemin vers le template Word
-const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modele IA.docx');
+const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
