@@ -17,7 +17,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "pdfkit": "^0.14.0",
-    "docx-templates": "^4.9.1"
+    "docx-templates": "^4.9.1",
+    "libreoffice-convert": "^1.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
