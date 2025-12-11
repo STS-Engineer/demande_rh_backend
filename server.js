@@ -34,6 +34,9 @@ const BASE_URL = 'https://hr-back.azurewebsites.net';
 
 // Chemin vers le template Word
 const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
+// Chemin vers les templates Word
+const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
+const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -92,6 +95,66 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   }
   return type_conge;
 }
+
+
+// Fonction pour générer une attestation de salaire Word
+async function genererAttestationSalaireWord(employe) {
+  try {
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_SALAIRE_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_SALAIRE_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
+    const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
+    
+    // Formater le salaire avec séparateur de milliers
+    const formaterSalaire = (salaire) => {
+      if (!salaire) return '0,00';
+      return parseFloat(salaire).toLocaleString('fr-TN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }).replace(/,/g, ' '); // Remplacer la virgule par un espace pour les milliers
+    };
+    
+    // Obtenir l'année actuelle
+    const anneeActuelle = new Date().getFullYear();
+    
+    // Données à injecter dans le template
+    const data = {
+      nom_complet: `${employe.nom} ${employe.prenom}`,
+      cin: employe.cin || '',
+      date_debut: formatDateFR(employe.date_debut),
+      poste: employe.poste || '',
+      salaire: formaterSalaire(employe.salaire_brute),
+      date_actuelle: formatDateFR(new Date()),
+      annee_date_actuelle: anneeActuelle.toString()
+    };
+    
+    // Générer le document Word
+    const reportBuffer = await createReport({
+      template: templateBuffer,
+      data,
+      cmdDelimiter: ['{{', '}}'],
+      // Options supplémentaires pour préserver le formatage
+      additionalJsContext: {
+        uppercase: (str) => str ? str.toUpperCase() : '',
+        lowercase: (str) => str ? str.toLowerCase() : '',
+        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
+      }
+    });
+    
+    return reportBuffer;
+    
+  } catch (error) {
+    console.error('Erreur lors de la génération Word:', error);
+    throw error;
+  }
+}
+
 
 // Fonction pour générer une attestation Word
 async function genererAttestationWord(employe) {
@@ -170,10 +233,10 @@ app.post('/api/generer-attestation', async (req, res) => {
       });
     }
 
-    // Récupérer les informations de l'employé
+    // Récupérer les informations de l'employé (INCLURE LE SALAIRE)
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
-              date_naissance, cin, matricule
+              date_naissance, cin, matricule, salaire_brute
        FROM employees WHERE id = $1`,
       [employe_id]
     );
@@ -183,12 +246,28 @@ app.post('/api/generer-attestation', async (req, res) => {
     }
 
     const employe = employeResult.rows[0];
+    let wordBuffer;
+    let fileName;
+    let documentTypeLabel;
 
-    // Générer le document Word
-    const wordBuffer = await genererAttestationWord(employe);
-
-    // Nom du fichier
-    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+    // Générer le document Word selon le type
+    if (type_document === 'attestation_salaire') {
+      wordBuffer = await genererAttestationSalaireWord(employe);
+      fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
+      documentTypeLabel = 'Attestation de salaire';
+      
+      // Vérifier si le salaire existe
+      if (!employe.salaire_brute) {
+        return res.status(400).json({ 
+          error: 'Salaire non disponible pour cet employé' 
+        });
+      }
+    } else {
+      // Par défaut, attestation de travail
+      wordBuffer = await genererAttestationWord(employe);
+      fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+      documentTypeLabel = 'Attestation de travail';
+    }
 
     // Préparer l'email
     const mailOptions = {
@@ -197,22 +276,23 @@ app.post('/api/generer-attestation', async (req, res) => {
         address: 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
-      subject: `Demande d'attestation de travail - ${employe.nom} ${employe.prenom}`,
+      subject: `Demande d'${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
-            Demande d'attestation de travail
+            Demande d'${documentTypeLabel.toLowerCase()}
           </h2>
           <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
             <p><strong>Matricule:</strong> ${employe.matricule || 'Non spécifié'}</p>
             <p><strong>Poste:</strong> ${employe.poste || 'Non spécifié'}</p>
             <p><strong>Date d'embauche:</strong> ${formatDateFR(employe.date_debut)}</p>
-            <p><strong>Type de document:</strong> ${type_document}</p>
+            <p><strong>Type de document:</strong> ${documentTypeLabel}</p>
+            ${type_document === 'attestation_salaire' ? `<p><strong>Salaire brut annuel:</strong> ${employe.salaire_brute} TND</p>` : ''}
             <p><strong>Date de la demande:</strong> ${formatDateFR(new Date())}</p>
           </div>
           <p style="color: #6b7280; font-size: 14px;">
-            L'attestation de travail est jointe à cet email en format Word (.docx).
+            L'${documentTypeLabel.toLowerCase()} est jointe à cet email en format Word (.docx).
           </p>
         </div>
       `,
@@ -227,12 +307,10 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     // Envoyer l'email
     await transporter.sendMail(mailOptions);
-    
-    // NE PAS enregistrer dans la base de données demande_rh
 
     res.json({ 
       success: true, 
-      message: 'Attestation générée et envoyée par email avec succès',
+      message: `${documentTypeLabel} générée et envoyée par email avec succès`,
       fileName: fileName
     });
 
@@ -241,6 +319,49 @@ app.post('/api/generer-attestation', async (req, res) => {
     res.status(500).json({ 
       error: 'Erreur lors de la génération de l\'attestation: ' + err.message 
     });
+  }
+});
+
+// Route pour télécharger l'attestation directement (optionnel)
+app.post('/api/telecharger-attestation', async (req, res) => {
+  const { employe_id, type_document } = req.body;
+
+  try {
+    if (!employe_id) {
+      return res.status(400).json({ error: 'ID employé requis' });
+    }
+
+    const employeResult = await pool.query(
+      `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
+       FROM employees WHERE id = $1`,
+      [employe_id]
+    );
+
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
+
+    const employe = employeResult.rows[0];
+    let wordBuffer;
+    let fileName;
+
+    // Générer le document selon le type
+    if (type_document === 'attestation_salaire') {
+      wordBuffer = await genererAttestationSalaireWord(employe);
+      fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
+    } else {
+      wordBuffer = await genererAttestationWord(employe);
+      fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+    }
+    
+    // Envoyer le fichier Word en téléchargement
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(wordBuffer);
+
+  } catch (error) {
+    console.error('Erreur:', error);
+    res.status(500).json({ error: 'Erreur lors de la génération du document' });
   }
 });
 
