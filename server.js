@@ -82,7 +82,7 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-// Fonction pour générer un PDF d'attestation de travail
+// Fonction pour générer un PDF d'attestation de travail identique au template
 async function genererAttestationPDF(employe) {
   return new Promise((resolve, reject) => {
     try {
@@ -97,46 +97,187 @@ async function genererAttestationPDF(employe) {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
       
-      // En-tête
-      doc.fontSize(16).font('Helvetica-Bold')
+      // Titre centré en gras
+      doc.fontSize(24).font('Helvetica-Bold')
          .text('ATTESTATION DE TRAVAIL', { align: 'center' })
-         .moveDown(2);
-      
-      // Contenu principal
-      doc.fontSize(12).font('Helvetica')
-         .text('Je soussigné, Chaouachi Fethi, Directeur SAME Tunisie Service', { align: 'left' })
-         .text('filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif', { align: 'left' })
-         .text('2050- TUNISIE atteste que :', { align: 'left' })
-         .moveDown();
-      
-      doc.font('Helvetica-Bold')
-         .text(`${employe.nom} ${employe.prenom}`, { align: 'left' })
-         .moveDown(0.5);
-      
-      doc.font('Helvetica')
-         .text(`née le ${formatDateFR(employe.date_naissance || '')},`, { align: 'left' })
-         .text(`titulaire de la CIN N° : ${employe.cin || ''}`, { align: 'left' })
-         .text(`est salariée titulaire depuis le ${formatDateFR(employe.date_debut)} en qualité de :`, { align: 'left' })
-         .moveDown();
-      
-      doc.font('Helvetica-Bold')
-         .text(`- ${employe.poste || 'Non spécifié'}`, { align: 'left' })
          .moveDown(3);
       
-      // Pied de page
+      // Texte avec mise en forme spéciale
+      doc.fontSize(14).font('Helvetica')
+         .text('Je soussigné, ', { continued: true });
+      
+      doc.font('Helvetica-Bold')
+         .text('Chaouachi Fethi, Directeur ', { continued: true });
+      
       doc.font('Helvetica')
-         .text('En foi de quoi la présente attestation est délivrée pour servir et', { align: 'left' })
-         .text('valoir ce que de droit.', { align: 'left' })
+         .text('SAME Tunisie Service', { continued: true })
+         .text('')
+         .text('filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif')
+         .text('2050- TUNISIE atteste que :', { continued: true });
+      
+      // Ligne pour le nom
+      doc.moveDown(1);
+      doc.fontSize(14)
+         .text('......', { 
+           underline: true, 
+           continued: true,
+           width: 400 
+         });
+      
+      // Nom de l'employé en gras au-dessus de la ligne
+      const nomComplet = `${employe.nom} ${employe.prenom}`;
+      const underlineWidth = doc.widthOfString('......');
+      
+      // Positionner le nom au-dessus de la ligne
+      const currentY = doc.y - 20; // Remonter pour placer le nom
+      doc.y = currentY;
+      doc.font('Helvetica-Bold')
+         .text(nomComplet, {
+           width: underlineWidth
+         });
+      
+      // Repositionner pour continuer après la ligne
+      doc.y = currentY + 20;
+      
+      // Date de naissance
+      doc.font('Helvetica')
+         .text('née le ', { continued: true });
+      
+      doc.text('…/…/……', { 
+         underline: true,
+         continued: true,
+         width: 100
+       });
+      
+      // Date réelle au-dessus de la ligne
+      const dateNaissance = formatDateFR(employe.date_naissance || '');
+      const dateNaissanceWidth = doc.widthOfString('…/…/……');
+      const dateNaissanceX = doc.x - dateNaissanceWidth;
+      const dateNaissanceY = doc.y - 20;
+      
+      doc.save()
+         .font('Helvetica')
+         .fontSize(12)
+         .text(dateNaissance, dateNaissanceX, dateNaissanceY, {
+           width: dateNaissanceWidth
+         })
+         .restore();
+      
+      doc.moveDown(1);
+      
+      // CIN
+      doc.font('Helvetica')
+         .text('titulaire de la CIN N° : ', { continued: true });
+      
+      doc.text('......', { 
+         underline: true,
+         continued: true,
+         width: 100
+       });
+      
+      // CIN réelle au-dessus de la ligne
+      const cin = employe.cin || '';
+      const cinWidth = doc.widthOfString('......');
+      const cinX = doc.x - cinWidth;
+      const cinY = doc.y - 20;
+      
+      doc.save()
+         .font('Helvetica')
+         .fontSize(12)
+         .text(cin, cinX, cinY, {
+           width: cinWidth
+         })
+         .restore();
+      
+      doc.moveDown(1);
+      
+      // Date d'embauche
+      doc.font('Helvetica')
+         .text('est salariée titulaire depuis le ', { continued: true });
+      
+      doc.text('…/…/……', { 
+         underline: true,
+         width: 100
+       });
+      
+      // Date d'embauche réelle au-dessus de la ligne
+      const dateDebut = formatDateFR(employe.date_debut);
+      const dateDebutWidth = doc.widthOfString('…/…/……');
+      const dateDebutX = doc.x - dateDebutWidth;
+      const dateDebutY = doc.y - 20;
+      
+      doc.save()
+         .font('Helvetica')
+         .fontSize(12)
+         .text(dateDebut, dateDebutX, dateDebutY, {
+           width: dateDebutWidth
+         })
+         .restore();
+      
+      doc.text('en qualité de :', { continued: true })
          .moveDown(2);
       
-      doc.text('Fait à H.Lif,', { align: 'left' })
-         .moveDown(0.5);
+      // Poste avec tiret
+      doc.font('Helvetica')
+         .text('- ', { continued: true });
       
-      doc.text(`Le ${formatDateFR(new Date())}.`, { align: 'left' })
+      doc.text('......', { 
+         underline: true,
+         width: 300
+       });
+      
+      // Poste réel au-dessus de la ligne
+      const poste = employe.poste || '';
+      const posteWidth = doc.widthOfString('......');
+      const posteX = doc.x - posteWidth;
+      const posteY = doc.y - 20;
+      
+      doc.save()
+         .font('Helvetica-Bold')
+         .fontSize(12)
+         .text(poste, posteX, posteY, {
+           width: posteWidth
+         })
+         .restore();
+      
+      doc.moveDown(4);
+      
+      // Texte standard
+      doc.font('Helvetica')
+         .text('En foi de quoi la présente attestation est délivrée pour servir et')
+         .text('valoir ce que de droit.')
          .moveDown(3);
+      
+      // Lieu et date
+      doc.text('Fait à H.Lif,')
+         .moveDown(1);
+      
+      doc.text('Le ', { continued: true });
+      
+      doc.text('…/…/…….', { 
+         underline: true,
+         width: 100
+       });
+      
+      // Date actuelle au-dessus de la ligne
+      const dateActuelle = formatDateFR(new Date());
+      const dateActuelleWidth = doc.widthOfString('…/…/…….');
+      const dateActuelleX = doc.x - dateActuelleWidth;
+      const dateActuelleY = doc.y - 20;
+      
+      doc.save()
+         .font('Helvetica')
+         .fontSize(12)
+         .text(dateActuelle, dateActuelleX, dateActuelleY, {
+           width: dateActuelleWidth
+         })
+         .restore();
+      
+      doc.moveDown(3);
       
       // Signature
       doc.font('Helvetica-Bold')
+         .fontSize(16)
          .text('Directeur SAME Tunisie Service', { align: 'right' });
       
       doc.end();
