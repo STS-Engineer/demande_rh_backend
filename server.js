@@ -2,7 +2,9 @@ const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
-const PDFDocument = require('pdfkit');
+const fs = require('fs').promises;
+const path = require('path');
+const createReport = require('docx-templates').default;
 require('dotenv').config();
 
 const app = express();
@@ -29,6 +31,9 @@ const transporter = nodemailer.createTransport({
 
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
+
+// Chemin vers le template Word
+const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modele IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -61,8 +66,14 @@ function formatDateShort(date) {
 // Helper : formatage date française (JJ/MM/AAAA)
 function formatDateFR(date) {
   if (!date) return '';
+  
+  // Si c'est déjà une chaîne au format JJ/MM/AAAA, la retourner telle quelle
+  if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+    return date;
+  }
+  
   const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date;
+  if (Number.isNaN(d.getTime())) return '';
   
   const jour = String(d.getDate()).padStart(2, '0');
   const mois = String(d.getMonth() + 1).padStart(2, '0');
@@ -82,253 +93,72 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-// Fonction pour générer un PDF d'attestation de travail IDENTIQUE au template
-async function genererAttestationPDF(employe) {
-  return new Promise((resolve, reject) => {
+// Fonction pour générer une attestation Word
+async function genererAttestationWord(employe) {
+  try {
+    // Vérifier si le template existe
     try {
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 70,
-        font: 'Helvetica'
-      });
-      
-      const chunks = [];
-      
-      doc.on('data', chunk => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
-      
-      // 1. TITRE - exactement comme le template
-      doc.fontSize(24)
-         .font('Helvetica-Bold')
-         .text('# ATTESTATION DE TRAVAIL', {
-           align: 'center',
-           underline: false
-         })
-         .moveDown(4);
-      
-      // 2. TEXTE PRINCIPAL - structure identique
-      const lignes = [
-        "Je soussigné, **Chaouachi Fethi, Directeur** **SAME Tunisie Service**",
-        "filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif",
-        "2050- TUNISIE atteste que ...... née le …/…/……,",
-        "titulaire de la CIN N° : ...... est salariée titulaire depuis le",
-        "…/…/…… en qualité de :",
-        "",
-        "- ......",
-        "",
-        "En foi de quoi la présente attestation est délivrée pour servir et",
-        "valoir ce que de droit.",
-        "",
-        "Fait à H.Lif,",
-        "",
-        "Le …/…/…….",
-        "",
-        "## Directeur SAME Tunisie Service"
-      ];
-      
-      let yPosition = doc.y;
-      
-      // Ligne 1: avec mise en forme spéciale
-      const parts1 = lignes[0].split('**');
-      let xPos = 50;
-      
-      parts1.forEach((part, i) => {
-        if (i === 0) {
-          // "Je soussigné, "
-          doc.fontSize(14)
-             .font('Helvetica')
-             .text(part, xPos, yPosition);
-          xPos += doc.widthOfString(part);
-        } else if (i === 1) {
-          // "Chaouachi Fethi, Directeur"
-          doc.font('Helvetica-Bold')
-             .text(part, xPos, yPosition);
-          xPos += doc.widthOfString(part);
-        } else if (i === 2) {
-          // " "
-          doc.font('Helvetica')
-             .text(part, xPos, yPosition);
-          xPos += doc.widthOfString(part);
-        } else if (i === 3) {
-          // "SAME Tunisie Service"
-          doc.font('Helvetica-Bold')
-             .text(part, xPos, yPosition);
-        }
-      });
-      
-      yPosition += 25;
-      
-      // Ligne 2: normale
-      doc.fontSize(14)
-         .font('Helvetica')
-         .text(lignes[1], 50, yPosition);
-      
-      yPosition += 25;
-      
-      // Ligne 3: avec informations de l'employé
-      const nomComplet = `${employe.nom} ${employe.prenom}`;
-      const dateNaissance = formatDateFR(employe.date_naissance || '');
-      
-      // Texte avant le nom
-      const avantNom = "2050- TUNISIE atteste que ";
-      doc.font('Helvetica')
-         .text(avantNom, 50, yPosition);
-      
-      // Dessiner une ligne pour le nom
-      const ligneStartX = 50 + doc.widthOfString(avantNom);
-      const ligneEndX = ligneStartX + 150;
-      
-      // Ligne pointillée
-      doc.moveTo(ligneStartX, yPosition + 15)
-         .lineTo(ligneEndX, yPosition + 15)
-         .lineWidth(1)
-         .stroke();
-      
-      // Écrire le nom au-dessus de la ligne
-      const nomWidth = doc.widthOfString(nomComplet);
-      const nomX = ligneStartX + (150 - nomWidth) / 2;
-      
-      doc.font('Helvetica')
-         .text(nomComplet, nomX, yPosition - 5);
-      
-      // Suite de la ligne 3
-      const suiteLigne3 = " née le ";
-      doc.text(suiteLigne3, ligneEndX + 5, yPosition);
-      
-      const apresDateNaissance = doc.widthOfString(suiteLigne3);
-      const dateNaissanceX = ligneEndX + 5 + apresDateNaissance;
-      
-      // Ligne pour date de naissance
-      doc.moveTo(dateNaissanceX, yPosition + 15)
-         .lineTo(dateNaissanceX + 80, yPosition + 15)
-         .stroke();
-      
-      // Date de naissance au-dessus
-      const dateNaissanceWidth = doc.widthOfString(dateNaissance);
-      const dateNaissanceCenterX = dateNaissanceX + (80 - dateNaissanceWidth) / 2;
-      doc.text(dateNaissance, dateNaissanceCenterX, yPosition - 5);
-      
-      // Virgule à la fin
-      doc.text(",", dateNaissanceX + 80 + 5, yPosition);
-      
-      yPosition += 25;
-      
-      // Ligne 4: CIN
-      const avantCIN = "titulaire de la CIN N° : ";
-      doc.text(avantCIN, 50, yPosition);
-      
-      const cinStartX = 50 + doc.widthOfString(avantCIN);
-      
-      // Ligne pour CIN
-      doc.moveTo(cinStartX, yPosition + 15)
-         .lineTo(cinStartX + 100, yPosition + 15)
-         .stroke();
-      
-      // CIN au-dessus
-      const cin = employe.cin || '';
-      const cinWidth = doc.widthOfString(cin);
-      const cinCenterX = cinStartX + (100 - cinWidth) / 2;
-      doc.text(cin, cinCenterX, yPosition - 5);
-      
-      const suiteLigne4 = " est salariée titulaire depuis le";
-      doc.text(suiteLigne4, cinStartX + 100 + 5, yPosition);
-      
-      yPosition += 25;
-      
-      // Ligne 5: Date d'embauche
-      const avantDateEmbauche = "";
-      doc.text(avantDateEmbauche, 50, yPosition);
-      
-      const dateEmbaucheStartX = 50 + doc.widthOfString(avantDateEmbauche);
-      
-      // Ligne pour date d'embauche
-      doc.moveTo(dateEmbaucheStartX, yPosition + 15)
-         .lineTo(dateEmbaucheStartX + 80, yPosition + 15)
-         .stroke();
-      
-      // Date d'embauche au-dessus
-      const dateEmbauche = formatDateFR(employe.date_debut);
-      const dateEmbaucheWidth = doc.widthOfString(dateEmbauche);
-      const dateEmbaucheCenterX = dateEmbaucheStartX + (80 - dateEmbaucheWidth) / 2;
-      doc.text(dateEmbauche, dateEmbaucheCenterX, yPosition - 5);
-      
-      const suiteLigne5 = " en qualité de :";
-      doc.text(suiteLigne5, dateEmbaucheStartX + 80 + 5, yPosition);
-      
-      yPosition += 40;
-      
-      // Poste avec tiret
-      const poste = employe.poste || '';
-      const tiretX = 70;
-      
-      // Dessiner le tiret
-      doc.text("-", tiretX, yPosition);
-      
-      // Ligne pour poste
-      const posteStartX = tiretX + 20;
-      doc.moveTo(posteStartX, yPosition + 15)
-         .lineTo(posteStartX + 300, yPosition + 15)
-         .stroke();
-      
-      // Poste au-dessus
-      const posteWidth = doc.widthOfString(poste);
-      const posteCenterX = posteStartX + (300 - posteWidth) / 2;
-      doc.text(poste, posteCenterX, yPosition - 5);
-      
-      yPosition += 60;
-      
-      // Ligne 8-9: Texte standard
-      doc.text("En foi de quoi la présente attestation est délivrée pour servir et", 50, yPosition);
-      yPosition += 25;
-      doc.text("valoir ce que de droit.", 50, yPosition);
-      
-      yPosition += 40;
-      
-      // Ligne 10: Lieu
-      doc.text("Fait à H.Lif,", 50, yPosition);
-      
-      yPosition += 40;
-      
-      // Ligne 11: Date
-      const avantDate = "Le ";
-      doc.text(avantDate, 50, yPosition);
-      
-      const dateActuelleStartX = 50 + doc.widthOfString(avantDate);
-      
-      // Ligne pour date actuelle
-      doc.moveTo(dateActuelleStartX, yPosition + 15)
-         .lineTo(dateActuelleStartX + 80, yPosition + 15)
-         .stroke();
-      
-      // Date actuelle au-dessus
-      const dateActuelle = formatDateFR(new Date());
-      const dateActuelleWidth = doc.widthOfString(dateActuelle);
-      const dateActuelleCenterX = dateActuelleStartX + (80 - dateActuelleWidth) / 2;
-      doc.text(dateActuelle, dateActuelleCenterX, yPosition - 5);
-      
-      // Point à la fin
-      doc.text(".", dateActuelleStartX + 80 + 5, yPosition);
-      
-      yPosition += 40;
-      
-      // Signature
-      doc.fontSize(16)
-         .font('Helvetica-Bold')
-         .text("Directeur SAME Tunisie Service", {
-           align: 'right',
-           y: yPosition
-         });
-      
-      doc.end();
-      
+      await fs.access(TEMPLATE_PATH);
     } catch (error) {
-      reject(error);
+      console.error(`Template non trouvé: ${TEMPLATE_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
-  });
+    
+    // Lire le template Word
+    const templateBuffer = await fs.readFile(TEMPLATE_PATH);
+    
+    // Données à injecter dans le template
+    const data = {
+      nom_complet: `${employe.nom} ${employe.prenom}`,
+      date_naissance: formatDateFR(employe.date_naissance || ''),
+      cin: employe.cin || '',
+      date_debut: formatDateFR(employe.date_debut),
+      poste: employe.poste || '',
+      date_actuelle: formatDateFR(new Date())
+    };
+    
+    // Générer le document Word
+    const reportBuffer = await createReport({
+      template: templateBuffer,
+      data,
+      cmdDelimiter: ['{{', '}}'],
+      // Options supplémentaires pour préserver le formatage
+      additionalJsContext: {
+        uppercase: (str) => str ? str.toUpperCase() : '',
+        lowercase: (str) => str ? str.toLowerCase() : '',
+        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
+      }
+    });
+    
+    return reportBuffer;
+    
+  } catch (error) {
+    console.error('Erreur lors de la génération Word:', error);
+    throw error;
+  }
 }
 
-// Nouvelle route pour générer une attestation
+// ==================== ROUTES API ====================
+
+// Récupérer tous les employés actifs (sans date de départ)
+app.get('/api/employees/actifs', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
+              mail_responsable1, mail_responsable2, date_debut,
+              date_naissance, cin
+       FROM employees 
+       WHERE date_depart IS NULL 
+       ORDER BY nom, prenom`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des employés' });
+  }
+});
+
+// Route pour générer une attestation Word et l'envoyer par email
 app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
@@ -354,8 +184,11 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     const employe = employeResult.rows[0];
 
-    // Générer le PDF d'attestation
-    const pdfBuffer = await genererAttestationPDF(employe);
+    // Générer le document Word
+    const wordBuffer = await genererAttestationWord(employe);
+
+    // Nom du fichier
+    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
 
     // Préparer l'email
     const mailOptions = {
@@ -379,15 +212,15 @@ app.post('/api/generer-attestation', async (req, res) => {
             <p><strong>Date de la demande:</strong> ${formatDateFR(new Date())}</p>
           </div>
           <p style="color: #6b7280; font-size: 14px;">
-            L'attestation de travail est jointe à cet email en format PDF.
+            L'attestation de travail est jointe à cet email en format Word (.docx).
           </p>
         </div>
       `,
       attachments: [
         {
-          filename: `Attestation_Travail_${employe.nom}_${employe.prenom}.pdf`,
-          content: pdfBuffer,
-          contentType: 'application/pdf'
+          filename: fileName,
+          content: wordBuffer,
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         }
       ]
     };
@@ -396,11 +229,11 @@ app.post('/api/generer-attestation', async (req, res) => {
     await transporter.sendMail(mailOptions);
     
     // NE PAS enregistrer dans la base de données demande_rh
-    // Seulement envoyer par email
 
     res.json({ 
       success: true, 
-      message: 'Attestation générée et envoyée par email avec succès'
+      message: 'Attestation générée et envoyée par email avec succès',
+      fileName: fileName
     });
 
   } catch (err) {
@@ -411,25 +244,42 @@ app.post('/api/generer-attestation', async (req, res) => {
   }
 });
 
-// Récupérer tous les employés actifs (sans date de départ)
-app.get('/api/employees/actifs', async (req, res) => {
+// Route pour télécharger l'attestation directement (optionnel)
+app.post('/api/telecharger-attestation', async (req, res) => {
+  const { employe_id } = req.body;
+
   try {
-    const result = await pool.query(
-      `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
-              mail_responsable1, mail_responsable2, date_debut,
-              date_naissance, cin
-       FROM employees 
-       WHERE date_depart IS NULL 
-       ORDER BY nom, prenom`
+    if (!employe_id) {
+      return res.status(400).json({ error: 'ID employé requis' });
+    }
+
+    const employeResult = await pool.query(
+      `SELECT nom, prenom, poste, date_debut, date_naissance, cin
+       FROM employees WHERE id = $1`,
+      [employe_id]
     );
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur lors de la récupération des employés' });
+
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
+
+    const employe = employeResult.rows[0];
+    const wordBuffer = await genererAttestationWord(employe);
+    
+    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+    
+    // Envoyer le fichier Word en téléchargement
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(wordBuffer);
+
+  } catch (error) {
+    console.error('Erreur:', error);
+    res.status(500).json({ error: 'Erreur lors de la génération du document' });
   }
 });
 
-// Créer une nouvelle demande RH
+// Créer une nouvelle demande RH (congé/autorisation/mission)
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id,
@@ -888,7 +738,7 @@ app.get('/approuver-demande', async (req, res) => {
             if (card && message) {
               const info = document.createElement('p');
               info.style.marginTop = '20px';
-              info.style.textAlign = 'center';
+              info.style.text-align = 'center';
               info.style.color = '#374151';
               info.textContent = message;
               card.appendChild(info);
@@ -1110,7 +960,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande (avec nom du responsable qui refuse) - CORRIGÉ
+// Refuser une demande (avec nom du responsable qui refuse)
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -1135,7 +985,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // CORRECTION : Mettre à jour le champ approuve_responsable à FALSE selon le niveau
+    // Mettre à jour le champ approuve_responsable à FALSE selon le niveau
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
@@ -1227,5 +1077,6 @@ app.listen(PORT, () => {
   console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
-  console.log(`📄 API Attestations: http://localhost:${PORT}/api/generer-attestation`);
+  console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
+  console.log(`📁 Assurez-vous d'avoir le template Word dans: ${TEMPLATE_PATH}`);
 });
