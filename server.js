@@ -82,13 +82,14 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-// Fonction pour générer un PDF d'attestation de travail identique au template
+// Fonction pour générer un PDF d'attestation de travail IDENTIQUE au template
 async function genererAttestationPDF(employe) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
         size: 'A4',
-        margin: 50
+        margin: 70,
+        font: 'Helvetica'
       });
       
       const chunks = [];
@@ -97,188 +98,227 @@ async function genererAttestationPDF(employe) {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
       
-      // Titre centré en gras
-      doc.fontSize(24).font('Helvetica-Bold')
-         .text('ATTESTATION DE TRAVAIL', { align: 'center' })
-         .moveDown(3);
+      // 1. TITRE - exactement comme le template
+      doc.fontSize(24)
+         .font('Helvetica-Bold')
+         .text('# ATTESTATION DE TRAVAIL', {
+           align: 'center',
+           underline: false
+         })
+         .moveDown(4);
       
-      // Texte avec mise en forme spéciale
-      doc.fontSize(14).font('Helvetica')
-         .text('Je soussigné, ', { continued: true });
+      // 2. TEXTE PRINCIPAL - structure identique
+      const lignes = [
+        "Je soussigné, **Chaouachi Fethi, Directeur** **SAME Tunisie Service**",
+        "filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif",
+        "2050- TUNISIE atteste que ...... née le …/…/……,",
+        "titulaire de la CIN N° : ...... est salariée titulaire depuis le",
+        "…/…/…… en qualité de :",
+        "",
+        "- ......",
+        "",
+        "En foi de quoi la présente attestation est délivrée pour servir et",
+        "valoir ce que de droit.",
+        "",
+        "Fait à H.Lif,",
+        "",
+        "Le …/…/…….",
+        "",
+        "## Directeur SAME Tunisie Service"
+      ];
       
-      doc.font('Helvetica-Bold')
-         .text('Chaouachi Fethi, Directeur ', { continued: true });
+      let yPosition = doc.y;
       
-      doc.font('Helvetica')
-         .text('SAME Tunisie Service', { continued: true })
-         .text('')
-         .text('filiale de AVOCarbon Group, sise au Cyber Parc Cité Med Ali H.Lif')
-         .text('2050- TUNISIE atteste que :', { continued: true });
+      // Ligne 1: avec mise en forme spéciale
+      const parts1 = lignes[0].split('**');
+      let xPos = 50;
       
-      // Ligne pour le nom
-      doc.moveDown(1);
+      parts1.forEach((part, i) => {
+        if (i === 0) {
+          // "Je soussigné, "
+          doc.fontSize(14)
+             .font('Helvetica')
+             .text(part, xPos, yPosition);
+          xPos += doc.widthOfString(part);
+        } else if (i === 1) {
+          // "Chaouachi Fethi, Directeur"
+          doc.font('Helvetica-Bold')
+             .text(part, xPos, yPosition);
+          xPos += doc.widthOfString(part);
+        } else if (i === 2) {
+          // " "
+          doc.font('Helvetica')
+             .text(part, xPos, yPosition);
+          xPos += doc.widthOfString(part);
+        } else if (i === 3) {
+          // "SAME Tunisie Service"
+          doc.font('Helvetica-Bold')
+             .text(part, xPos, yPosition);
+        }
+      });
+      
+      yPosition += 25;
+      
+      // Ligne 2: normale
       doc.fontSize(14)
-         .text('......', { 
-           underline: true, 
-           continued: true,
-           width: 400 
-         });
+         .font('Helvetica')
+         .text(lignes[1], 50, yPosition);
       
-      // Nom de l'employé en gras au-dessus de la ligne
+      yPosition += 25;
+      
+      // Ligne 3: avec informations de l'employé
       const nomComplet = `${employe.nom} ${employe.prenom}`;
-      const underlineWidth = doc.widthOfString('......');
-      
-      // Positionner le nom au-dessus de la ligne
-      const currentY = doc.y - 20; // Remonter pour placer le nom
-      doc.y = currentY;
-      doc.font('Helvetica-Bold')
-         .text(nomComplet, {
-           width: underlineWidth
-         });
-      
-      // Repositionner pour continuer après la ligne
-      doc.y = currentY + 20;
-      
-      // Date de naissance
-      doc.font('Helvetica')
-         .text('née le ', { continued: true });
-      
-      doc.text('…/…/……', { 
-         underline: true,
-         continued: true,
-         width: 100
-       });
-      
-      // Date réelle au-dessus de la ligne
       const dateNaissance = formatDateFR(employe.date_naissance || '');
-      const dateNaissanceWidth = doc.widthOfString('…/…/……');
-      const dateNaissanceX = doc.x - dateNaissanceWidth;
-      const dateNaissanceY = doc.y - 20;
       
-      doc.save()
-         .font('Helvetica')
-         .fontSize(12)
-         .text(dateNaissance, dateNaissanceX, dateNaissanceY, {
-           width: dateNaissanceWidth
-         })
-         .restore();
-      
-      doc.moveDown(1);
-      
-      // CIN
+      // Texte avant le nom
+      const avantNom = "2050- TUNISIE atteste que ";
       doc.font('Helvetica')
-         .text('titulaire de la CIN N° : ', { continued: true });
+         .text(avantNom, 50, yPosition);
       
-      doc.text('......', { 
-         underline: true,
-         continued: true,
-         width: 100
-       });
+      // Dessiner une ligne pour le nom
+      const ligneStartX = 50 + doc.widthOfString(avantNom);
+      const ligneEndX = ligneStartX + 150;
       
-      // CIN réelle au-dessus de la ligne
+      // Ligne pointillée
+      doc.moveTo(ligneStartX, yPosition + 15)
+         .lineTo(ligneEndX, yPosition + 15)
+         .lineWidth(1)
+         .stroke();
+      
+      // Écrire le nom au-dessus de la ligne
+      const nomWidth = doc.widthOfString(nomComplet);
+      const nomX = ligneStartX + (150 - nomWidth) / 2;
+      
+      doc.font('Helvetica')
+         .text(nomComplet, nomX, yPosition - 5);
+      
+      // Suite de la ligne 3
+      const suiteLigne3 = " née le ";
+      doc.text(suiteLigne3, ligneEndX + 5, yPosition);
+      
+      const apresDateNaissance = doc.widthOfString(suiteLigne3);
+      const dateNaissanceX = ligneEndX + 5 + apresDateNaissance;
+      
+      // Ligne pour date de naissance
+      doc.moveTo(dateNaissanceX, yPosition + 15)
+         .lineTo(dateNaissanceX + 80, yPosition + 15)
+         .stroke();
+      
+      // Date de naissance au-dessus
+      const dateNaissanceWidth = doc.widthOfString(dateNaissance);
+      const dateNaissanceCenterX = dateNaissanceX + (80 - dateNaissanceWidth) / 2;
+      doc.text(dateNaissance, dateNaissanceCenterX, yPosition - 5);
+      
+      // Virgule à la fin
+      doc.text(",", dateNaissanceX + 80 + 5, yPosition);
+      
+      yPosition += 25;
+      
+      // Ligne 4: CIN
+      const avantCIN = "titulaire de la CIN N° : ";
+      doc.text(avantCIN, 50, yPosition);
+      
+      const cinStartX = 50 + doc.widthOfString(avantCIN);
+      
+      // Ligne pour CIN
+      doc.moveTo(cinStartX, yPosition + 15)
+         .lineTo(cinStartX + 100, yPosition + 15)
+         .stroke();
+      
+      // CIN au-dessus
       const cin = employe.cin || '';
-      const cinWidth = doc.widthOfString('......');
-      const cinX = doc.x - cinWidth;
-      const cinY = doc.y - 20;
+      const cinWidth = doc.widthOfString(cin);
+      const cinCenterX = cinStartX + (100 - cinWidth) / 2;
+      doc.text(cin, cinCenterX, yPosition - 5);
       
-      doc.save()
-         .font('Helvetica')
-         .fontSize(12)
-         .text(cin, cinX, cinY, {
-           width: cinWidth
-         })
-         .restore();
+      const suiteLigne4 = " est salariée titulaire depuis le";
+      doc.text(suiteLigne4, cinStartX + 100 + 5, yPosition);
       
-      doc.moveDown(1);
+      yPosition += 25;
       
-      // Date d'embauche
-      doc.font('Helvetica')
-         .text('est salariée titulaire depuis le ', { continued: true });
+      // Ligne 5: Date d'embauche
+      const avantDateEmbauche = "";
+      doc.text(avantDateEmbauche, 50, yPosition);
       
-      doc.text('…/…/……', { 
-         underline: true,
-         width: 100
-       });
+      const dateEmbaucheStartX = 50 + doc.widthOfString(avantDateEmbauche);
       
-      // Date d'embauche réelle au-dessus de la ligne
-      const dateDebut = formatDateFR(employe.date_debut);
-      const dateDebutWidth = doc.widthOfString('…/…/……');
-      const dateDebutX = doc.x - dateDebutWidth;
-      const dateDebutY = doc.y - 20;
+      // Ligne pour date d'embauche
+      doc.moveTo(dateEmbaucheStartX, yPosition + 15)
+         .lineTo(dateEmbaucheStartX + 80, yPosition + 15)
+         .stroke();
       
-      doc.save()
-         .font('Helvetica')
-         .fontSize(12)
-         .text(dateDebut, dateDebutX, dateDebutY, {
-           width: dateDebutWidth
-         })
-         .restore();
+      // Date d'embauche au-dessus
+      const dateEmbauche = formatDateFR(employe.date_debut);
+      const dateEmbaucheWidth = doc.widthOfString(dateEmbauche);
+      const dateEmbaucheCenterX = dateEmbaucheStartX + (80 - dateEmbaucheWidth) / 2;
+      doc.text(dateEmbauche, dateEmbaucheCenterX, yPosition - 5);
       
-      doc.text('en qualité de :', { continued: true })
-         .moveDown(2);
+      const suiteLigne5 = " en qualité de :";
+      doc.text(suiteLigne5, dateEmbaucheStartX + 80 + 5, yPosition);
+      
+      yPosition += 40;
       
       // Poste avec tiret
-      doc.font('Helvetica')
-         .text('- ', { continued: true });
-      
-      doc.text('......', { 
-         underline: true,
-         width: 300
-       });
-      
-      // Poste réel au-dessus de la ligne
       const poste = employe.poste || '';
-      const posteWidth = doc.widthOfString('......');
-      const posteX = doc.x - posteWidth;
-      const posteY = doc.y - 20;
+      const tiretX = 70;
       
-      doc.save()
-         .font('Helvetica-Bold')
-         .fontSize(12)
-         .text(poste, posteX, posteY, {
-           width: posteWidth
-         })
-         .restore();
+      // Dessiner le tiret
+      doc.text("-", tiretX, yPosition);
       
-      doc.moveDown(4);
+      // Ligne pour poste
+      const posteStartX = tiretX + 20;
+      doc.moveTo(posteStartX, yPosition + 15)
+         .lineTo(posteStartX + 300, yPosition + 15)
+         .stroke();
       
-      // Texte standard
-      doc.font('Helvetica')
-         .text('En foi de quoi la présente attestation est délivrée pour servir et')
-         .text('valoir ce que de droit.')
-         .moveDown(3);
+      // Poste au-dessus
+      const posteWidth = doc.widthOfString(poste);
+      const posteCenterX = posteStartX + (300 - posteWidth) / 2;
+      doc.text(poste, posteCenterX, yPosition - 5);
       
-      // Lieu et date
-      doc.text('Fait à H.Lif,')
-         .moveDown(1);
+      yPosition += 60;
       
-      doc.text('Le ', { continued: true });
+      // Ligne 8-9: Texte standard
+      doc.text("En foi de quoi la présente attestation est délivrée pour servir et", 50, yPosition);
+      yPosition += 25;
+      doc.text("valoir ce que de droit.", 50, yPosition);
       
-      doc.text('…/…/…….', { 
-         underline: true,
-         width: 100
-       });
+      yPosition += 40;
       
-      // Date actuelle au-dessus de la ligne
+      // Ligne 10: Lieu
+      doc.text("Fait à H.Lif,", 50, yPosition);
+      
+      yPosition += 40;
+      
+      // Ligne 11: Date
+      const avantDate = "Le ";
+      doc.text(avantDate, 50, yPosition);
+      
+      const dateActuelleStartX = 50 + doc.widthOfString(avantDate);
+      
+      // Ligne pour date actuelle
+      doc.moveTo(dateActuelleStartX, yPosition + 15)
+         .lineTo(dateActuelleStartX + 80, yPosition + 15)
+         .stroke();
+      
+      // Date actuelle au-dessus
       const dateActuelle = formatDateFR(new Date());
-      const dateActuelleWidth = doc.widthOfString('…/…/…….');
-      const dateActuelleX = doc.x - dateActuelleWidth;
-      const dateActuelleY = doc.y - 20;
+      const dateActuelleWidth = doc.widthOfString(dateActuelle);
+      const dateActuelleCenterX = dateActuelleStartX + (80 - dateActuelleWidth) / 2;
+      doc.text(dateActuelle, dateActuelleCenterX, yPosition - 5);
       
-      doc.save()
-         .font('Helvetica')
-         .fontSize(12)
-         .text(dateActuelle, dateActuelleX, dateActuelleY, {
-           width: dateActuelleWidth
-         })
-         .restore();
+      // Point à la fin
+      doc.text(".", dateActuelleStartX + 80 + 5, yPosition);
       
-      doc.moveDown(3);
+      yPosition += 40;
       
       // Signature
-      doc.font('Helvetica-Bold')
-         .fontSize(16)
-         .text('Directeur SAME Tunisie Service', { align: 'right' });
+      doc.fontSize(16)
+         .font('Helvetica-Bold')
+         .text("Directeur SAME Tunisie Service", {
+           align: 'right',
+           y: yPosition
+         });
       
       doc.end();
       
