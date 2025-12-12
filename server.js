@@ -37,6 +37,7 @@ const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail 
 // Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
+const TEMPLATE_DEMISSION_PATH = path.join(__dirname, 'templates', 'Attestation de demission Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -182,6 +183,57 @@ async function genererAttestationSalaireWord(employe) {
   }
 }
 
+
+
+// Fonction pour générer une lettre de démission Word
+async function genererDemissionWord(employe) {
+  try {
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_DEMISSION_PATH);
+    } catch (error) {
+      console.error(`Template de démission non trouvé: ${TEMPLATE_DEMISSION_PATH}`);
+      throw new Error('Template Word de démission non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
+    const templateBuffer = await fs.readFile(TEMPLATE_DEMISSION_PATH);
+    
+    // Générer la référence
+    const reference = genererReference(employe.nom, employe.prenom);
+    
+    // Données à injecter dans le template
+    const data = {
+      reference: reference,  // <-- Ajout de la référence si nécessaire
+      nom_complet: `${employe.nom} ${employe.prenom}`,
+      poste: employe.poste || '',
+      date_actuelle: formatDateFR(new Date())
+    };
+    
+    // Générer le document Word
+    const reportBuffer = await createReport({
+      template: templateBuffer,
+      data,
+      cmdDelimiter: ['{{', '}}'],
+      // Options supplémentaires pour préserver le formatage
+      additionalJsContext: {
+        uppercase: (str) => str ? str.toUpperCase() : '',
+        lowercase: (str) => str ? str.toLowerCase() : '',
+        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
+      }
+    });
+    
+    return reportBuffer;
+    
+  } catch (error) {
+    console.error('Erreur lors de la génération de la lettre de démission:', error);
+    throw error;
+  }
+}
+
+
+
+
 // Fonction pour générer une attestation Word
 async function genererAttestationWord(employe) {
   try {
@@ -292,6 +344,10 @@ app.post('/api/generer-attestation', async (req, res) => {
           error: 'Salaire non disponible pour cet employé' 
         });
       }
+    } else if (type_document === 'lettre_demission') {
+      wordBuffer = await genererDemissionWord(employe);
+      fileName = `Lettre_Demission_${employe.nom}_${employe.prenom}.docx`;
+      documentTypeLabel = 'Lettre de démission';
     } else {
       // Par défaut, attestation de travail
       wordBuffer = await genererAttestationWord(employe);
@@ -306,11 +362,11 @@ app.post('/api/generer-attestation', async (req, res) => {
         address: 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
-      subject: `Demande d'${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
+      subject: `Demande de ${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
-            Demande d'${documentTypeLabel.toLowerCase()}
+            Demande de ${documentTypeLabel.toLowerCase()}
           </h2>
           <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
@@ -322,7 +378,7 @@ app.post('/api/generer-attestation', async (req, res) => {
             <p><strong>Date de la demande:</strong> ${formatDateFR(new Date())}</p>
           </div>
           <p style="color: #6b7280; font-size: 14px;">
-            L'${documentTypeLabel.toLowerCase()} est jointe à cet email en format Word (.docx).
+            ${documentTypeLabel} est jointe à cet email en format Word (.docx).
           </p>
         </div>
       `,
@@ -347,7 +403,7 @@ app.post('/api/generer-attestation', async (req, res) => {
   } catch (err) {
     console.error('Erreur lors de la génération d\'attestation:', err);
     res.status(500).json({ 
-      error: 'Erreur lors de la génération de l\'attestation: ' + err.message 
+      error: 'Erreur lors de la génération du document: ' + err.message 
     });
   }
 });
