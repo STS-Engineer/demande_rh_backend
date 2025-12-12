@@ -58,6 +58,33 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+
+
+
+
+
+// Helper : générer une référence unique
+function genererReference(nom, prenom) {
+  const now = new Date();
+  
+  // Premier caractère du prénom (ou nom si prénom vide)
+  const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
+  
+  // Format date: DDMMYYYYHHMMSS
+  const jour = String(now.getDate()).padStart(2, '0');
+  const mois = String(now.getMonth() + 1).padStart(2, '0');
+  const annee = now.getFullYear();
+  const heures = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const secondes = String(now.getSeconds()).padStart(2, '0');
+  
+  return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
+}
+
+
+
+
+
 // Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
   if (!date) return '';
@@ -96,7 +123,6 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-
 // Fonction pour générer une attestation de salaire Word
 async function genererAttestationSalaireWord(employe) {
   try {
@@ -120,18 +146,19 @@ async function genererAttestationSalaireWord(employe) {
       }).replace(/,/g, ' '); // Remplacer la virgule par un espace pour les milliers
     };
     
-    // Obtenir l'année actuelle
-    const anneeActuelle = new Date().getFullYear();
+    // Générer la référence
+    const reference = genererReference(employe.nom, employe.prenom);
     
     // Données à injecter dans le template
     const data = {
+      reference: reference,  // <-- Ajout de la référence
       nom_complet: `${employe.nom} ${employe.prenom}`,
       cin: employe.cin || '',
       date_debut: formatDateFR(employe.date_debut),
       poste: employe.poste || '',
       salaire: formaterSalaire(employe.salaire_brute),
-      date_actuelle: formatDateFR(new Date()),
-      annee_date_actuelle: anneeActuelle.toString()
+      date_actuelle: formatDateFR(new Date())
+      // Note: {{annee_date_actuelle}} n'est plus utilisé dans le template
     };
     
     // Générer le document Word
@@ -155,7 +182,6 @@ async function genererAttestationSalaireWord(employe) {
   }
 }
 
-
 // Fonction pour générer une attestation Word
 async function genererAttestationWord(employe) {
   try {
@@ -170,8 +196,12 @@ async function genererAttestationWord(employe) {
     // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_PATH);
     
+    // Générer la référence
+    const reference = genererReference(employe.nom, employe.prenom);
+    
     // Données à injecter dans le template
     const data = {
+      reference: reference,  // <-- Ajout de la référence
       nom_complet: `${employe.nom} ${employe.prenom}`,
       date_naissance: formatDateFR(employe.date_naissance || ''),
       cin: employe.cin || '',
