@@ -69,7 +69,7 @@ function genererReference(nom, prenom) {
   
   // Premier caractère du prénom (ou nom si prénom vide)
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
-  
+  const initial2 = (nom ? nom[0] : prenom ? prenom[0] : 'X').toUpperCase();
   // Format date: DDMMYYYYHHMMSS
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
@@ -78,7 +78,7 @@ function genererReference(nom, prenom) {
   const minutes = String(now.getMinutes()).padStart(2, '0');
   const secondes = String(now.getSeconds()).padStart(2, '0');
   
-  return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
+  return `${initial}${initial2}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
 
 
