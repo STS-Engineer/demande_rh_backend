@@ -185,52 +185,6 @@ async function genererAttestationSalaireWord(employe) {
 
 
 
-// Fonction pour générer une lettre de démission Word
-async function genererDemissionWord(employe) {
-  try {
-    // Vérifier si le template existe
-    try {
-      await fs.access(TEMPLATE_DEMISSION_PATH);
-    } catch (error) {
-      console.error(`Template de démission non trouvé: ${TEMPLATE_DEMISSION_PATH}`);
-      throw new Error('Template Word de démission non trouvé. Placez-le dans le dossier templates/');
-    }
-    
-    // Lire le template Word
-    const templateBuffer = await fs.readFile(TEMPLATE_DEMISSION_PATH);
-    
-    // Générer la référence
-    const reference = genererReference(employe.nom, employe.prenom);
-    
-    // Données à injecter dans le template
-    const data = {
-      reference: reference,  // <-- Ajout de la référence si nécessaire
-      nom_complet: `${employe.nom} ${employe.prenom}`,
-      poste: employe.poste || '',
-      date_actuelle: formatDateFR(new Date())
-    };
-    
-    // Générer le document Word
-    const reportBuffer = await createReport({
-      template: templateBuffer,
-      data,
-      cmdDelimiter: ['{{', '}}'],
-      // Options supplémentaires pour préserver le formatage
-      additionalJsContext: {
-        uppercase: (str) => str ? str.toUpperCase() : '',
-        lowercase: (str) => str ? str.toLowerCase() : '',
-        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
-      }
-    });
-    
-    return reportBuffer;
-    
-  } catch (error) {
-    console.error('Erreur lors de la génération de la lettre de démission:', error);
-    throw error;
-  }
-}
-
 
 
 
