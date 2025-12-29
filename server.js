@@ -30,7 +30,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // Email de l'équipe RH
-const EMAIL_RH_TEAM = 'nesria.ibrahim@avocarbon.com';
+const EMAIL_RH_TEAM = 'majed.messai@avocarbon.com';
 
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
