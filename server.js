@@ -32,9 +32,12 @@ const transporter = nodemailer.createTransport({
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
 
+// Chemin vers le template Word
+const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 // Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
+const TEMPLATE_DEMISSION_PATH = path.join(__dirname, 'templates', 'Attestation de demission Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -56,12 +59,19 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+
+
+
+
+
 // Helper : générer une référence unique
 function genererReference(nom, prenom) {
   const now = new Date();
   
+  // Premier caractère du prénom (ou nom si prénom vide)
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
   
+  // Format date: DDMMYYYYHHMMSS
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
   const annee = now.getFullYear();
@@ -71,6 +81,10 @@ function genererReference(nom, prenom) {
   
   return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
+
+
+
+
 
 // Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
@@ -84,6 +98,7 @@ function formatDateShort(date) {
 function formatDateFR(date) {
   if (!date) return '';
   
+  // Si c'est déjà une chaîne au format JJ/MM/AAAA, la retourner telle quelle
   if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
     return date;
   }
@@ -129,7 +144,7 @@ async function genererAttestationSalaireWord(employe) {
       return parseFloat(salaire).toLocaleString('fr-TN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2
-      }).replace(/,/g, ' ');
+      }).replace(/,/g, ' '); // Remplacer la virgule par un espace pour les milliers
     };
     
     // Générer la référence
@@ -137,13 +152,14 @@ async function genererAttestationSalaireWord(employe) {
     
     // Données à injecter dans le template
     const data = {
-      reference: reference,
+      reference: reference,  // <-- Ajout de la référence
       nom_complet: `${employe.nom} ${employe.prenom}`,
       cin: employe.cin || '',
       date_debut: formatDateFR(employe.date_debut),
       poste: employe.poste || '',
       salaire: formaterSalaire(employe.salaire_brute),
       date_actuelle: formatDateFR(new Date())
+      // Note: {{annee_date_actuelle}} n'est plus utilisé dans le template
     };
     
     // Générer le document Word
@@ -151,6 +167,7 @@ async function genererAttestationSalaireWord(employe) {
       template: templateBuffer,
       data,
       cmdDelimiter: ['{{', '}}'],
+      // Options supplémentaires pour préserver le formatage
       additionalJsContext: {
         uppercase: (str) => str ? str.toUpperCase() : '',
         lowercase: (str) => str ? str.toLowerCase() : '',
@@ -166,26 +183,31 @@ async function genererAttestationSalaireWord(employe) {
   }
 }
 
-// Fonction pour générer une attestation de travail Word
-async function genererAttestationTravailWord(employe) {
+
+
+
+
+
+// Fonction pour générer une attestation Word
+async function genererAttestationWord(employe) {
   try {
     // Vérifier si le template existe
     try {
-      await fs.access(TEMPLATE_TRAVAIL_PATH);
+      await fs.access(TEMPLATE_PATH);
     } catch (error) {
-      console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
+      console.error(`Template non trouvé: ${TEMPLATE_PATH}`);
       throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
     
     // Lire le template Word
-    const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
+    const templateBuffer = await fs.readFile(TEMPLATE_PATH);
     
     // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
     
     // Données à injecter dans le template
     const data = {
-      reference: reference,
+      reference: reference,  // <-- Ajout de la référence
       nom_complet: `${employe.nom} ${employe.prenom}`,
       date_naissance: formatDateFR(employe.date_naissance || ''),
       cin: employe.cin || '',
@@ -199,6 +221,7 @@ async function genererAttestationTravailWord(employe) {
       template: templateBuffer,
       data,
       cmdDelimiter: ['{{', '}}'],
+      // Options supplémentaires pour préserver le formatage
       additionalJsContext: {
         uppercase: (str) => str ? str.toUpperCase() : '',
         lowercase: (str) => str ? str.toLowerCase() : '',
@@ -222,7 +245,7 @@ app.get('/api/employees/actifs', async (req, res) => {
     const result = await pool.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
               mail_responsable1, mail_responsable2, date_debut,
-              date_naissance, cin, salaire_brute
+              date_naissance, cin
        FROM employees 
        WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
@@ -246,7 +269,7 @@ app.post('/api/generer-attestation', async (req, res) => {
       });
     }
 
-    // Récupérer les informations de l'employé
+    // Récupérer les informations de l'employé (INCLURE LE SALAIRE)
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
@@ -275,9 +298,13 @@ app.post('/api/generer-attestation', async (req, res) => {
           error: 'Salaire non disponible pour cet employé' 
         });
       }
+    } else if (type_document === 'lettre_demission') {
+      wordBuffer = await genererDemissionWord(employe);
+      fileName = `Lettre_Demission_${employe.nom}_${employe.prenom}.docx`;
+      documentTypeLabel = 'Lettre de démission';
     } else {
       // Par défaut, attestation de travail
-      wordBuffer = await genererAttestationTravailWord(employe);
+      wordBuffer = await genererAttestationWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
@@ -332,6 +359,84 @@ app.post('/api/generer-attestation', async (req, res) => {
     res.status(500).json({ 
       error: 'Erreur lors de la génération du document: ' + err.message 
     });
+  }
+});
+
+// Route pour télécharger l'attestation directement (optionnel)
+app.post('/api/telecharger-attestation', async (req, res) => {
+  const { employe_id, type_document } = req.body;
+
+  try {
+    if (!employe_id) {
+      return res.status(400).json({ error: 'ID employé requis' });
+    }
+
+    const employeResult = await pool.query(
+      `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
+       FROM employees WHERE id = $1`,
+      [employe_id]
+    );
+
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
+
+    const employe = employeResult.rows[0];
+    let wordBuffer;
+    let fileName;
+
+    // Générer le document selon le type
+    if (type_document === 'attestation_salaire') {
+      wordBuffer = await genererAttestationSalaireWord(employe);
+      fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
+    } else {
+      wordBuffer = await genererAttestationWord(employe);
+      fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+    }
+    
+    // Envoyer le fichier Word en téléchargement
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(wordBuffer);
+
+  } catch (error) {
+    console.error('Erreur:', error);
+    res.status(500).json({ error: 'Erreur lors de la génération du document' });
+  }
+});
+
+// Route pour télécharger l'attestation directement (optionnel)
+app.post('/api/telecharger-attestation', async (req, res) => {
+  const { employe_id } = req.body;
+
+  try {
+    if (!employe_id) {
+      return res.status(400).json({ error: 'ID employé requis' });
+    }
+
+    const employeResult = await pool.query(
+      `SELECT nom, prenom, poste, date_debut, date_naissance, cin
+       FROM employees WHERE id = $1`,
+      [employe_id]
+    );
+
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
+
+    const employe = employeResult.rows[0];
+    const wordBuffer = await genererAttestationWord(employe);
+    
+    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
+    
+    // Envoyer le fichier Word en téléchargement
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(wordBuffer);
+
+  } catch (error) {
+    console.error('Erreur:', error);
+    res.status(500).json({ error: 'Erreur lors de la génération du document' });
   }
 });
 
@@ -794,7 +899,7 @@ app.get('/approuver-demande', async (req, res) => {
             if (card && message) {
               const info = document.createElement('p');
               info.style.marginTop = '20px';
-              info.style.textAlign = 'center';
+              info.style.text-align = 'center';
               info.style.color = '#374151';
               info.textContent = message;
               card.appendChild(info);
@@ -1134,7 +1239,5 @@ app.listen(PORT, () => {
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
   console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
-  console.log(`📁 Templates Word nécessaires:`);
-  console.log(`   - ${TEMPLATE_TRAVAIL_PATH}`);
-  console.log(`   - ${TEMPLATE_SALAIRE_PATH}`);
+  console.log(`📁 Assurez-vous d'avoir le template Word dans: ${TEMPLATE_PATH}`);
 });
