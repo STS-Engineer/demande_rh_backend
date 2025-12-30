@@ -18,42 +18,16 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'rh_application',
   password: process.env.DB_PASSWORD || 'St$@0987',
   port: process.env.DB_PORT || 5432,
-  ssl: { rejectUnauthorized: false },
-  // Ajouter des timeouts pour éviter les blocages
-  connectionTimeoutMillis: 5000,
-  idleTimeoutMillis: 30000,
+  ssl: { rejectUnauthorized: false }
 });
 
-// Configuration SMTP Outlook CORRIGÉE
+// Configuration SMTP Outlook
 const transporter = nodemailer.createTransport({
-  host: 'smtp.office365.com',
-  port: 587, // CHANGÉ: Port 587 au lieu de 25
-  secure: false, // false pour STARTTLS
-  requireTLS: true, // Ajouté
-  auth: {
-    user: "administration.STS@avocarbon.com",
-    pass: "shnlgdyfbcztbhxn",
-  },
-  tls: {
-    ciphers: 'SSLv3',
-    rejectUnauthorized: false
-  },
-  debug: true,
-  logger: true
+  host: 'avocarbon-com.mail.protection.outlook.com',
+  port: 25,
+  secure: false,
+  tls: { rejectUnauthorized: false }
 });
-
-// Fonction pour tester la connexion SMTP au démarrage
-async function testSMTPConnection() {
-  try {
-    console.log('🔍 Test de connexion SMTP...');
-    await transporter.verify();
-    console.log('✅ Connexion SMTP OK');
-    return true;
-  } catch (error) {
-    console.error('❌ Échec connexion SMTP:', error.message);
-    return false;
-  }
-}
 
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
@@ -133,55 +107,6 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
     return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
   }
   return type_conge;
-}
-
-// Fonction améliorée pour envoyer des emails avec retry
-async function sendEmailWithRetry(mailOptions, maxRetries = 3) {
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      console.log(`📧 Tentative d'envoi ${attempt}/${maxRetries} à ${mailOptions.to}`);
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`✅ Email envoyé à ${mailOptions.to}, Message ID: ${info.messageId}`);
-      
-      // Log dans la base de données
-      try {
-        await pool.query(
-          `INSERT INTO email_logs (destinataire, sujet, statut, message_id, created_at) 
-           VALUES ($1, $2, $3, $4, NOW())`,
-          [mailOptions.to, mailOptions.subject, 'envoye', info.messageId]
-        );
-      } catch (logError) {
-        console.error('⚠️ Erreur log email:', logError.message);
-      }
-      
-      return info;
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ Erreur d'envoi (tentative ${attempt}/${maxRetries}):`, error.message);
-      
-      // Log erreur
-      try {
-        await pool.query(
-          `INSERT INTO email_logs (destinataire, sujet, statut, erreur, created_at) 
-           VALUES ($1, $2, $3, $4, NOW())`,
-          [mailOptions.to, mailOptions.subject, 'erreur', error.message]
-        );
-      } catch (logError) {
-        console.error('⚠️ Erreur log erreur email:', logError.message);
-      }
-      
-      if (attempt < maxRetries) {
-        // Backoff exponentiel
-        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-        console.log(`⏳ Nouvelle tentative dans ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-  }
-  
-  throw lastError;
 }
 
 // Fonction pour générer une attestation de travail Word
@@ -393,8 +318,8 @@ app.post('/api/generer-attestation', async (req, res) => {
       ]
     };
 
-    // Envoyer l'email avec retry
-    await sendEmailWithRetry(mailOptions);
+    // Envoyer l'email
+    await transporter.sendMail(mailOptions);
 
     res.json({ 
       success: true, 
@@ -453,7 +378,7 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   }
 });
 
-// Créer une nouvelle demande RH (congé/autorisation/mission) - AMÉLIORÉE
+// Créer une nouvelle demande RH (congé/autorisation/mission)
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id,
@@ -468,8 +393,6 @@ app.post('/api/demandes', async (req, res) => {
     frais_deplacement,
     type_conge_autre
   } = req.body;
-
-  let client; // Pour la transaction
 
   try {
     // Validation des champs obligatoires
@@ -500,12 +423,8 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
-    // Démarrer une transaction
-    client = await pool.connect();
-    await client.query('BEGIN');
-
     // Insérer la demande
-    const insertResult = await client.query(
+    const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
         heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
@@ -529,11 +448,7 @@ app.post('/api/demandes', async (req, res) => {
 
     const demandeId = insertResult.rows[0].id;
 
-    // Valider la transaction d'abord
-    await client.query('COMMIT');
-    client.release();
-
-    // Envoyer email au responsable 1 (en dehors de la transaction)
+    // Envoyer email au responsable 1
     if (employe.mail_responsable1) {
       await envoyerEmailResponsable(
         employe,
@@ -552,42 +467,22 @@ app.post('/api/demandes', async (req, res) => {
           type_conge_autre: typeCongeAutreFinal,
           frais_deplacement: fraisDeplacementFinal 
         }
-      ).catch(err => {
-        console.error(`⚠️ Email responsable1 non envoyé: ${err.message}`);
-        // Ne pas échouer la réponse car la demande est sauvegardée
-      });
+      );
     }
 
     res.json({ 
       success: true, 
       message: 'Demande créée avec succès',
-      demandeId,
-      emailEnvoye: !!employe.mail_responsable1
+      demandeId 
     });
   } catch (err) {
-    // Rollback en cas d'erreur
-    if (client) {
-      try {
-        await client.query('ROLLBACK');
-        client.release();
-      } catch (rollbackErr) {
-        console.error('Erreur rollback:', rollbackErr);
-      }
-    }
-
     console.error('Erreur détaillée:', err);
     res.status(500).json({ error: 'Erreur lors de la création de la demande: ' + err.message });
   }
 });
 
-// Fonction pour envoyer email au responsable - AMÉLIORÉE
+// Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details) {
-  // Valider l'email
-  if (!emailResponsable || !emailResponsable.includes('@')) {
-    console.error(`❌ Email invalide pour le responsable: ${emailResponsable}`);
-    throw new Error('Email responsable invalide');
-  }
-
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
@@ -639,7 +534,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       address: 'administration.STS@avocarbon.com'
     },
     to: emailResponsable,
-    subject: `[ACTION REQUISE] Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
+    subject: `Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
@@ -667,12 +562,15 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `
   };
 
-  // Utiliser la fonction avec retry
-  await sendEmailWithRetry(mailOptions);
-  console.log(`✅ Email envoyé à ${emailResponsable} pour la demande ${demandeId} (niveau ${niveau})`);
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId} (niveau ${niveau})`);
+  } catch (error) {
+    console.error('Erreur envoi email:', error);
+  }
 }
 
-// Page d'approbation/refus de demande
+// Page d'approbation/refus de demande - CORRIGÉE POUR LES ERREURS JS
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
   
@@ -974,13 +872,12 @@ app.get('/approuver-demande', async (req, res) => {
                 const data = await response.json().catch(() => ({}));
                 showResult('approuve', data.message || 'Votre décision a été enregistrée.');
               } else {
-                const errorText = await response.text();
-                alert('❌ Erreur lors de l\'approbation: ' + errorText);
+                alert('❌ Erreur lors de l\\'approbation');
                 setProcessing(false);
               }
             } catch (e) {
               console.error(e);
-              alert('❌ Erreur réseau: ' + e.message);
+              alert('❌ Erreur réseau');
               setProcessing(false);
             }
           }
@@ -1005,13 +902,12 @@ app.get('/approuver-demande', async (req, res) => {
                 const data = await response.json().catch(() => ({}));
                 showResult('refuse', data.message || 'Votre décision a été enregistrée.');
               } else {
-                const errorText = await response.text();
-                alert('❌ Erreur lors du refus: ' + errorText);
+                alert('❌ Erreur lors du refus');
                 setProcessing(false);
               }
             } catch (e) {
               console.error(e);
-              alert('❌ Erreur réseau: ' + e.message);
+              alert('❌ Erreur réseau');
               setProcessing(false);
             }
           }
@@ -1051,12 +947,10 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande - CORRIGÉE
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
-
-  let client;
 
   try {
     const demandeResult = await pool.query(
@@ -1078,14 +972,10 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Démarrer une transaction
-    client = await pool.connect();
-    await client.query('BEGIN');
-
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
     // Mettre à jour l'approbation (R1 ou R2) à TRUE
-    await client.query(
+    await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
@@ -1096,18 +986,15 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
-      // Valider la transaction
-      await client.query('COMMIT');
-      client.release();
 
       // Email à l'employé : approuvé par R1, en attente de R2
-      await sendEmailWithRetry({
+      await transporter.sendMail({
         from: {
           name: 'Administration STS',
           address: 'administration.STS@avocarbon.com'
         },
         to: demande.adresse_mail,
-        subject: '✅ Étape 1 : Demande RH approuvée par votre responsable',
+        subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
@@ -1121,11 +1008,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
           </div>
         `
-      }).catch(err => {
-        console.error('⚠️ Email employé non envoyé:', err.message);
       });
 
-      // Email au responsable 2
+      // Email au responsable 2 (avec mention que R1 a déjà approuvé → géré dans envoyerEmailResponsable)
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1143,9 +1028,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           type_conge_autre: demande.type_conge_autre,
           frais_deplacement: demande.frais_deplacement
         }
-      ).catch(err => {
-        console.error('⚠️ Email responsable2 non envoyé:', err.message);
-      });
+      );
       
       return res.json({ 
         success: true, 
@@ -1154,14 +1037,10 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     } 
 
     // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
-    // CORRECTION: Toujours mettre à jour le statut à 'approuve'
-    await client.query(
-      `UPDATE demande_rh SET statut = 'approuve', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    await pool.query(
+      `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
     );
-
-    await client.query('COMMIT');
-    client.release();
 
     // Qui est l'approbateur final ?
     let approuveur = null;
@@ -1176,13 +1055,13 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       : null;
 
     // Email final à l'employé
-    await sendEmailWithRetry({
+    await transporter.sendMail({
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: '✅ Votre demande RH a été définitivement approuvée',
+      subject: 'Votre demande RH a été définitivement approuvée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
@@ -1195,8 +1074,6 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           </div>
         </div>
       `
-    }).catch(err => {
-      console.error('⚠️ Email final non envoyé:', err.message);
     });
 
     res.json({ 
@@ -1204,27 +1081,15 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       message: 'Demande complètement approuvée' 
     });
   } catch (err) {
-    // Rollback en cas d'erreur
-    if (client) {
-      try {
-        await client.query('ROLLBACK');
-        client.release();
-      } catch (rollbackErr) {
-        console.error('Erreur rollback:', rollbackErr);
-      }
-    }
-    
-    console.error('Erreur approbation:', err);
-    res.status(500).json({ error: 'Erreur lors de l\'approbation: ' + err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de l\'approbation' });
   }
 });
 
-// Refuser une demande - AMÉLIORÉE
+// Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
-
-  let client;
 
   try {
     const demandeResult = await pool.query(
@@ -1246,14 +1111,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Démarrer une transaction
-    client = await pool.connect();
-    await client.query('BEGIN');
-
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
-    await client.query(
+    await pool.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', 
            commentaire_refus = $1, 
@@ -1262,9 +1123,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
        WHERE id = $2`,
       [commentaire, id]
     );
-
-    await client.query('COMMIT');
-    client.release();
 
     // Identité du responsable qui refuse
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
@@ -1282,13 +1140,13 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       : null;
 
     // Email à l'employé
-    await sendEmailWithRetry({
+    await transporter.sendMail({
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: '❌ Votre demande RH a été refusée',
+      subject: 'Votre demande RH a été refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
@@ -1301,8 +1159,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
           </div>
         </div>
       `
-    }).catch(err => {
-      console.error('⚠️ Email refus non envoyé:', err.message);
     });
 
     res.json({ 
@@ -1310,18 +1166,8 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       message: 'Demande refusée avec succès' 
     });
   } catch (err) {
-    // Rollback en cas d'erreur
-    if (client) {
-      try {
-        await client.query('ROLLBACK');
-        client.release();
-      } catch (rollbackErr) {
-        console.error('Erreur rollback:', rollbackErr);
-      }
-    }
-    
-    console.error('Erreur refus:', err);
-    res.status(500).json({ error: 'Erreur lors du refus: ' + err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors du refus' });
   }
 });
 
@@ -1341,102 +1187,20 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
   }
 });
 
-// Route pour vérifier les logs d'emails
-app.get('/api/email-logs', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT * FROM email_logs 
-       ORDER BY created_at DESC 
-       LIMIT 100`
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Erreur logs emails:', err);
-    res.status(500).json({ error: 'Erreur lors de la récupération des logs' });
-  }
-});
-
-// Route de santé améliorée
-app.get('/health', async (req, res) => {
-  try {
-    // Tester la base de données
-    const dbResult = await pool.query('SELECT NOW() as time');
-    
-    // Tester SMTP (mais ne pas bloquer si échec)
-    let smtpStatus = 'unknown';
-    try {
-      await transporter.verify();
-      smtpStatus = 'connected';
-    } catch (smtpError) {
-      smtpStatus = 'error: ' + smtpError.message;
-    }
-
-    res.json({ 
-      status: 'OK', 
-      message: 'Serveur RH fonctionnel',
-      timestamp: new Date().toISOString(),
-      database: {
-        status: 'connected',
-        time: dbResult.rows[0].time
-      },
-      smtp: {
-        status: smtpStatus
-      },
-      uptime: process.uptime()
-    });
-  } catch (err) {
-    res.status(500).json({ 
-      status: 'ERROR',
-      error: err.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Route pour tester SMTP
-app.get('/api/test-smtp', async (req, res) => {
-  try {
-    const testMail = {
-      from: 'administration.STS@avocarbon.com',
-      to: 'majed.messai@avocarbon.com',
-      subject: 'Test SMTP ' + new Date().toISOString(),
-      text: 'Ceci est un test de connexion SMTP',
-      html: '<p>Ceci est un test de connexion SMTP</p>'
-    };
-
-    const info = await transporter.sendMail(testMail);
-    
-    res.json({
-      success: true,
-      message: 'Test SMTP réussi',
-      messageId: info.messageId,
-      response: info.response,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('Test SMTP échoué:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+// Route de santé
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'Serveur RH fonctionnel',
+    timestamp: new Date().toISOString()
+  });
 });
 
 const PORT = process.env.PORT || 5000;
-
-// Tester la connexion SMTP au démarrage
-testSMTPConnection().then(success => {
-  if (!success) {
-    console.warn('⚠️ Attention: Connexion SMTP échouée. Les emails ne seront pas envoyés.');
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  console.log(`📧 Emails d'approbation: ${BASE_URL}/approuver-demande`);
-  console.log(`👥 API Employés: ${BASE_URL}/api/employees/actifs`);
-  console.log(`📋 API Demandes: ${BASE_URL}/api/demandes`);
-  console.log(`📄 API Attestations Word: ${BASE_URL}/api/generer-attestation`);
-  console.log(`🩺 Route santé: ${BASE_URL}/health`);
+  console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
+  console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
+  console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
+  console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
 });
