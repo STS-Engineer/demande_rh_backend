@@ -95,7 +95,7 @@ function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return date;
-  return d.toDateString();
+  return d.toLocaleDateString('fr-FR');
 }
 
 // Helper : label type de congé
@@ -335,7 +335,7 @@ app.post('/api/generer-attestation', async (req, res) => {
   }
 });
 
-// Route pour télécharger l'attestation directement (UNE SEULE ROUTE)
+// Route pour télécharger l'attestation directement
 app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
@@ -570,7 +570,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   }
 }
 
-// Page d'approbation/refus de demande
+// Page d'approbation/refus de demande - CORRIGÉE POUR LES ERREURS JS
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
   
@@ -619,6 +619,10 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
+    // CORRECTION: Échapper les apostrophes dans les chaînes JavaScript
+    const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
+    const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
+    
     res.send(`
       <!DOCTYPE html>
       <html lang="fr">
@@ -785,17 +789,21 @@ app.get('/approuver-demande', async (req, res) => {
           </div>
           
           <div class="buttons">
-            <button class="approve" id="approveBtn" onclick="approuver()">✅ Approuver</button>
-            <button class="reject" id="rejectBtn" onclick="toggleRefus()">❌ Refuser</button>
+            <button class="approve" id="approveBtn">✅ Approuver</button>
+            <button class="reject" id="rejectBtn">❌ Refuser</button>
           </div>
           
           <div class="refus-section">
             <textarea id="commentaire" rows="4" placeholder="Veuillez indiquer le motif du refus..."></textarea>
-            <button class="reject" onclick="refuser()" style="display:none; margin-top:10px;" id="confirmRefus">Confirmer le refus</button>
+            <button class="reject" id="confirmRefus" style="display:none; margin-top:10px;">Confirmer le refus</button>
           </div>
         </div>
 
         <script>
+          // Déclaration des variables globales
+          const demandeId = ${id};
+          const niveau = ${Number(niveau) || 1};
+          
           function setProcessing(isProcessing) {
             const approveBtn = document.getElementById('approveBtn');
             const rejectBtn = document.getElementById('rejectBtn');
@@ -837,7 +845,7 @@ app.get('/approuver-demande', async (req, res) => {
             if (card && message) {
               const info = document.createElement('p');
               info.style.marginTop = '20px';
-              info.style.text-align = 'center';
+              info.style.textAlign = 'center';
               info.style.color = '#374151';
               info.textContent = message;
               card.appendChild(info);
@@ -854,10 +862,10 @@ app.get('/approuver-demande', async (req, res) => {
           async function approuver() {
             setProcessing(true);
             try {
-              const response = await fetch('/api/demandes/${id}/approuver', {
+              const response = await fetch('/api/demandes/' + demandeId + '/approuver', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ niveau: ${Number(niveau) || 1} })
+                body: JSON.stringify({ niveau: niveau })
               });
               
               if (response.ok) {
@@ -884,10 +892,10 @@ app.get('/approuver-demande', async (req, res) => {
 
             setProcessing(true);
             try {
-              const response = await fetch('/api/demandes/${id}/refuser', {
+              const response = await fetch('/api/demandes/' + demandeId + '/refuser', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ niveau: ${Number(niveau) || 1}, commentaire })
+                body: JSON.stringify({ niveau: niveau, commentaire: commentaire })
               });
               
               if (response.ok) {
@@ -903,6 +911,25 @@ app.get('/approuver-demande', async (req, res) => {
               setProcessing(false);
             }
           }
+
+          // Initialisation des événements
+          document.addEventListener('DOMContentLoaded', function() {
+            const approveBtn = document.getElementById('approveBtn');
+            const rejectBtn = document.getElementById('rejectBtn');
+            const confirmRefus = document.getElementById('confirmRefus');
+            
+            if (approveBtn) {
+              approveBtn.addEventListener('click', approuver);
+            }
+            
+            if (rejectBtn) {
+              rejectBtn.addEventListener('click', toggleRefus);
+            }
+            
+            if (confirmRefus) {
+              confirmRefus.addEventListener('click', refuser);
+            }
+          });
         </script>
       </body>
       </html>
