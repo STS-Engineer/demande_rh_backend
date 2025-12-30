@@ -21,16 +21,171 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Configuration SMTP Outlook
-const transporter = nodemailer.createTransport({
-  host: 'avocarbon-com.mail.protection.outlook.com',
-  port: 25,
-  secure: false,
-  tls: { rejectUnauthorized: false }
-});
+// ==================== CONFIGURATION SMTP AMÉLIORÉE ====================
+
+// Fonction pour créer un transporteur SMTP
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com',
+    port: parseInt(process.env.SMTP_PORT) || 25,
+    secure: process.env.SMTP_SECURE === 'true' || false,
+    auth: {
+      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
+      pass: process.env.SMTP_PASS || 'shnlgdyfbcztbhxn'
+    },
+    tls: {
+      ciphers: 'SSLv3',
+      rejectUnauthorized: false
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000
+  });
+};
+
+// Pool de transporteurs SMTP pour une meilleure fiabilité
+const emailPool = {
+  transporters: [],
+  currentIndex: 0,
+  maxRetries: 3,
+  
+  init: function(count = 3) {
+    for (let i = 0; i < count; i++) {
+      this.transporters.push(createTransporter());
+    }
+    console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
+  },
+  
+  getTransporter: function() {
+    const transporter = this.transporters[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+    return transporter;
+  },
+  
+  rotateTransporter: function() {
+    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+    return this.getTransporter();
+  }
+};
+
+// Initialisation du pool
+emailPool.init(3);
+
+// Fonction pour vérifier la connexion SMTP
+async function verifySMTPConnection() {
+  for (let i = 0; i < emailPool.transporters.length; i++) {
+    try {
+      await emailPool.transporters[i].verify();
+      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
+    } catch (error) {
+      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+    }
+  }
+}
+
+// Fonction pour logger les détails d'envoi d'email
+function logEmailDetails(mailOptions, context, attempt = 1) {
+  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
+  console.log(`   Contexte: ${context}`);
+  console.log(`   Destinataire: ${mailOptions.to}`);
+  console.log(`   Sujet: ${mailOptions.subject}`);
+  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
+  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
+    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
+}
+
+// Fonction améliorée pour envoyer des emails avec retry et fallback
+async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
+  let lastError;
+  let lastTransporterIndex = emailPool.currentIndex;
+  
+  logEmailDetails(mailOptions, context, 1);
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const transporter = emailPool.getTransporter();
+    
+    try {
+      // Limiter la taille des pièces jointes pour éviter les timeouts
+      if (mailOptions.attachments && mailOptions.attachments.length > 0) {
+        const totalSize = mailOptions.attachments.reduce((sum, att) => {
+          return sum + (att.content?.length || 0);
+        }, 0);
+        
+        if (totalSize > 10 * 1024 * 1024) { // 10MB max
+          console.warn(`⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
+        }
+      }
+      
+      const info = await transporter.sendMail(mailOptions);
+      
+      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
+      console.log(`   Message ID: ${info.messageId}`);
+      
+      return {
+        success: true,
+        messageId: info.messageId,
+        attempt: attempt
+      };
+      
+    } catch (error) {
+      lastError = error;
+      lastTransporterIndex = emailPool.currentIndex;
+      
+      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
+      
+      if (attempt < maxRetries) {
+        // Backoff exponentiel avec jitter
+        const baseDelay = 1000;
+        const maxDelay = 10000;
+        const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+        const jitter = Math.random() * 1000;
+        const totalDelay = delay + jitter;
+        
+        console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
+        
+        // Changer de transporteur pour la prochaine tentative
+        emailPool.rotateTransporter();
+        
+        await new Promise(resolve => setTimeout(resolve, totalDelay));
+        
+        // Log de la nouvelle tentative
+        logEmailDetails(mailOptions, context, attempt + 1);
+      }
+    }
+  }
+  
+  // Toutes les tentatives ont échoué
+  console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
+  
+  // Essayer de recréer un transporteur comme dernier recours
+  try {
+    console.log('🔄 Tentative avec nouveau transporteur...');
+    const emergencyTransporter = createTransporter();
+    const info = await emergencyTransporter.sendMail(mailOptions);
+    console.log('✅ Email envoyé avec transporteur d\'urgence');
+    
+    return {
+      success: true,
+      messageId: info.messageId,
+      attempt: 'emergency',
+      warning: 'Sent with emergency transporter'
+    };
+  } catch (emergencyError) {
+    console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
+    
+    throw {
+      message: `Échec d'envoi après ${maxRetries} tentatives et transporteur d'urgence`,
+      originalError: lastError,
+      emergencyError: emergencyError,
+      context: context
+    };
+  }
+}
+
+// ==================== HELPER FUNCTIONS ====================
 
 // URL de base (backend déployé)
-const BASE_URL = 'https://hr-back.azurewebsites.net';
+const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
 
 // Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
@@ -109,6 +264,22 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
+// Fonction pour compresser les pièces jointes si nécessaire
+async function optimizeAttachments(attachments) {
+  if (!attachments || attachments.length === 0) return attachments;
+  
+  return attachments.map(attachment => {
+    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
+    // Pour l'instant, on se contente de vérifier la taille
+    if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
+      console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
+    }
+    return attachment;
+  });
+}
+
+// ==================== FONCTIONS DE GÉNÉRATION DE DOCUMENTS ====================
+
 // Fonction pour générer une attestation de travail Word
 async function genererAttestationTravailWord(employe) {
   try {
@@ -149,10 +320,12 @@ async function genererAttestationTravailWord(employe) {
       }
     });
     
+    console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
     
   } catch (error) {
-    console.error('Erreur lors de la génération Word:', error);
+    console.error('Erreur lors de la génération Word attestation travail:', error);
     throw error;
   }
 }
@@ -206,10 +379,12 @@ async function genererAttestationSalaireWord(employe) {
       }
     });
     
+    console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
     
   } catch (error) {
-    console.error('Erreur lors de la génération Word:', error);
+    console.error('Erreur lors de la génération Word attestation salaire:', error);
     throw error;
   }
 }
@@ -227,9 +402,10 @@ app.get('/api/employees/actifs', async (req, res) => {
        WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
     );
+    console.log(`✅ Récupération ${result.rows.length} employés actifs`);
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    console.error('❌ Erreur récupération employés:', err);
     res.status(500).json({ error: 'Erreur lors de la récupération des employés' });
   }
 });
@@ -245,6 +421,8 @@ app.post('/api/generer-attestation', async (req, res) => {
         error: 'Les champs employé et type de document sont obligatoires' 
       });
     }
+
+    console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
 
     // Récupérer les informations de l'employé
     const employeResult = await pool.query(
@@ -282,6 +460,15 @@ app.post('/api/generer-attestation', async (req, res) => {
       documentTypeLabel = 'Attestation de travail';
     }
 
+    // Optimiser les pièces jointes
+    const optimizedAttachments = await optimizeAttachments([
+      {
+        filename: fileName,
+        content: wordBuffer,
+        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      }
+    ]);
+
     // Préparer l'email
     const mailOptions = {
       from: {
@@ -309,28 +496,24 @@ app.post('/api/generer-attestation', async (req, res) => {
           </p>
         </div>
       `,
-      attachments: [
-        {
-          filename: fileName,
-          content: wordBuffer,
-          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        }
-      ]
+      attachments: optimizedAttachments
     };
 
-    // Envoyer l'email
-    await transporter.sendMail(mailOptions);
+    // Envoyer l'email avec retry
+    const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
 
     res.json({ 
       success: true, 
       message: `${documentTypeLabel} générée et envoyée par email avec succès`,
-      fileName: fileName
+      fileName: fileName,
+      emailResult: emailResult
     });
 
   } catch (err) {
-    console.error('Erreur lors de la génération d\'attestation:', err);
+    console.error('❌ Erreur lors de la génération d\'attestation:', err);
     res.status(500).json({ 
-      error: 'Erreur lors de la génération du document: ' + err.message 
+      error: 'Erreur lors de la génération du document: ' + err.message,
+      details: err.details || ''
     });
   }
 });
@@ -343,6 +526,8 @@ app.post('/api/telecharger-attestation', async (req, res) => {
     if (!employe_id) {
       return res.status(400).json({ error: 'ID employé requis' });
     }
+
+    console.log(`📥 Téléchargement attestation pour employé ${employe_id}, type: ${type_document}`);
 
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
@@ -370,10 +555,13 @@ app.post('/api/telecharger-attestation', async (req, res) => {
     // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', wordBuffer.length);
+    
+    console.log(`✅ Téléchargement ${fileName} (${wordBuffer.length} octets)`);
     res.send(wordBuffer);
 
   } catch (error) {
-    console.error('Erreur:', error);
+    console.error('❌ Erreur téléchargement attestation:', error);
     res.status(500).json({ error: 'Erreur lors de la génération du document' });
   }
 });
@@ -401,6 +589,8 @@ app.post('/api/demandes', async (req, res) => {
         error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
       });
     }
+
+    console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
 
     // Récupérer les informations de l'employé
     const employeResult = await pool.query(
@@ -447,6 +637,7 @@ app.post('/api/demandes', async (req, res) => {
     );
 
     const demandeId = insertResult.rows[0].id;
+    console.log(`✅ Demande créée avec ID: ${demandeId}`);
 
     // Envoyer email au responsable 1
     if (employe.mail_responsable1) {
@@ -468,6 +659,8 @@ app.post('/api/demandes', async (req, res) => {
           frais_deplacement: fraisDeplacementFinal 
         }
       );
+    } else {
+      console.warn(`⚠️ Aucun responsable 1 défini pour ${employe.nom} ${employe.prenom}`);
     }
 
     res.json({ 
@@ -476,7 +669,7 @@ app.post('/api/demandes', async (req, res) => {
       demandeId 
     });
   } catch (err) {
-    console.error('Erreur détaillée:', err);
+    console.error('❌ Erreur création demande:', err);
     res.status(500).json({ error: 'Erreur lors de la création de la demande: ' + err.message });
   }
 });
@@ -563,16 +756,19 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   };
 
   try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Email envoyé à ${emailResponsable} pour la demande ${demandeId} (niveau ${niveau})`);
+    await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
+    console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
-    console.error('Erreur envoi email:', error);
+    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
+    // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
   }
 }
 
-// Page d'approbation/refus de demande - CORRIGÉE POUR LES ERREURS JS
+// Page d'approbation/refus de demande
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
+  
+  console.log(`🔗 Accès page approbation demande ${id}, niveau ${niveau}`);
   
   try {
     const result = await pool.query(
@@ -599,6 +795,7 @@ app.get('/approuver-demande', async (req, res) => {
     
     // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
+      console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.send(`
         <html>
           <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
@@ -619,7 +816,7 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // CORRECTION: Échapper les apostrophes dans les chaînes JavaScript
+    // Échapper les apostrophes dans les chaînes JavaScript
     const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
     const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
     
@@ -935,7 +1132,7 @@ app.get('/approuver-demande', async (req, res) => {
       </html>
     `);
   } catch (err) {
-    console.error(err);
+    console.error('❌ Erreur page approbation:', err);
     res.status(500).send(`
       <html>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
@@ -951,6 +1148,8 @@ app.get('/approuver-demande', async (req, res) => {
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
+
+  console.log(`✅ Approbation demande ${id}, niveau ${niveau}`);
 
   try {
     const demandeResult = await pool.query(
@@ -969,6 +1168,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
+      console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
@@ -988,7 +1188,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     if (niveau == 1 && demande.mail_responsable2) {
 
       // Email à l'employé : approuvé par R1, en attente de R2
-      await transporter.sendMail({
+      await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
           address: 'administration.STS@avocarbon.com'
@@ -1008,9 +1208,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
           </div>
         `
-      });
+      }, 'Approbation niveau 1');
 
-      // Email au responsable 2 (avec mention que R1 a déjà approuvé → géré dans envoyerEmailResponsable)
+      // Email au responsable 2
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1055,7 +1255,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       : null;
 
     // Email final à l'employé
-    await transporter.sendMail({
+    await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
@@ -1074,14 +1274,16 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           </div>
         </div>
       `
-    });
+    }, 'Approbation finale demande');
 
+    console.log(`✅ Demande ${id} complètement approuvée`);
+    
     res.json({ 
       success: true, 
       message: 'Demande complètement approuvée' 
     });
   } catch (err) {
-    console.error(err);
+    console.error('❌ Erreur approbation demande:', err);
     res.status(500).json({ error: 'Erreur lors de l\'approbation' });
   }
 });
@@ -1090,6 +1292,8 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
+
+  console.log(`❌ Refus demande ${id}, niveau ${niveau}`);
 
   try {
     const demandeResult = await pool.query(
@@ -1108,6 +1312,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
+      console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
@@ -1140,7 +1345,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       : null;
 
     // Email à l'employé
-    await transporter.sendMail({
+    await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
@@ -1159,14 +1364,16 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
           </div>
         </div>
       `
-    });
+    }, 'Refus demande');
 
+    console.log(`✅ Demande ${id} refusée`);
+    
     res.json({ 
       success: true, 
       message: 'Demande refusée avec succès' 
     });
   } catch (err) {
-    console.error(err);
+    console.error('❌ Erreur refus demande:', err);
     res.status(500).json({ error: 'Erreur lors du refus' });
   }
 });
@@ -1180,27 +1387,128 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
        ORDER BY created_at DESC`,
       [req.params.id]
     );
+    console.log(`✅ Récupération ${result.rows.length} demandes pour employé ${req.params.id}`);
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    console.error('❌ Erreur récupération demandes:', err);
     res.status(500).json({ error: 'Erreur lors de la récupération des demandes' });
   }
 });
+
+// ==================== ROUTES DE DIAGNOSTIC ====================
 
 // Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    smtpPoolSize: emailPool.transporters.length,
+    activeTransporterIndex: emailPool.currentIndex
   });
 });
 
+// Route pour tester la configuration SMTP
+app.get('/api/test-email', async (req, res) => {
+  try {
+    const testMailOptions = {
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: 'majed.messai@avocarbon.com',
+      subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
+      text: 'Ceci est un email de test pour vérifier la configuration SMTP.',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2 style="color: #2563eb;">Test SMTP Configuration</h2>
+          <p>Ceci est un email de test envoyé depuis le serveur RH.</p>
+          <p>Timestamp: ${new Date().toISOString()}</p>
+          <p>Server: ${process.env.NODE_ENV || 'development'}</p>
+        </div>
+      `
+    };
+
+    const result = await sendEmailWithRetry(testMailOptions, 'Test SMTP');
+    
+    res.json({ 
+      success: true, 
+      message: 'Email de test envoyé avec succès',
+      result: result
+    });
+  } catch (error) {
+    console.error('❌ Erreur test email:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      details: error.originalError ? error.originalError.message : ''
+    });
+  }
+});
+
+// Route pour vérifier l'état des transporteurs SMTP
+app.get('/api/smtp-status', async (req, res) => {
+  const statuses = [];
+  
+  for (let i = 0; i < emailPool.transporters.length; i++) {
+    const transporter = emailPool.transporters[i];
+    try {
+      await transporter.verify();
+      statuses.push({
+        index: i,
+        status: 'OK',
+        isCurrent: i === emailPool.currentIndex
+      });
+    } catch (error) {
+      statuses.push({
+        index: i,
+        status: 'ERROR',
+        error: error.message,
+        isCurrent: i === emailPool.currentIndex
+      });
+    }
+  }
+  
+  res.json({
+    poolSize: emailPool.transporters.length,
+    currentIndex: emailPool.currentIndex,
+    maxRetries: emailPool.maxRetries,
+    transporters: statuses
+  });
+});
+
+// ==================== DÉMARRAGE DU SERVEUR ====================
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  console.log(`📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande`);
-  console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
-  console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
-  console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
+
+app.listen(PORT, async () => {
+  console.log(`
+  🚀 Serveur démarré sur le port ${PORT}
+  =========================================
+  📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande
+  👥 API Employés: http://localhost:${PORT}/api/employees/actifs
+  📋 API Demandes: http://localhost:${PORT}/api/demandes
+  📄 API Attestations: http://localhost:${PORT}/api/generer-attestation
+  🩺 Santé: http://localhost:${PORT}/health
+  🔧 Test SMTP: http://localhost:${PORT}/api/test-email
+  📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
+  `);
+  
+  // Vérifier la connexion SMTP au démarrage
+  await verifySMTPConnection();
+  
+  // Vérifier les templates Word
+  try {
+    await fs.access(TEMPLATE_TRAVAIL_PATH);
+    console.log('✅ Template attestation travail trouvé');
+  } catch {
+    console.warn('⚠️ Template attestation travail non trouvé');
+  }
+  
+  try {
+    await fs.access(TEMPLATE_SALAIRE_PATH);
+    console.log('✅ Template attestation salaire trouvé');
+  } catch {
+    console.warn('⚠️ Template attestation salaire non trouvé');
+  }
 });
