@@ -22,11 +22,21 @@ const pool = new Pool({
 });
 
 // Configuration SMTP Outlook
+// Configuration SMTP Outlook avec authentification
 const transporter = nodemailer.createTransport({
-  host: 'avocarbon-com.mail.protection.outlook.com',
-  port: 25,
+  host: 'smtp.office365.com',
+  port: 587,
   secure: false,
-  tls: { rejectUnauthorized: false }
+  auth: {
+    user: "administration.STS@avocarbon.com",
+    pass: "shnlgdyfbcztbhxn",
+  },
+  tls: {
+    ciphers: 'SSLv3',
+    rejectUnauthorized: false
+  },
+  debug: true, // Activer le debug
+  logger: true // Logger les activités SMTP
 });
 
 // URL de base (backend déployé)
