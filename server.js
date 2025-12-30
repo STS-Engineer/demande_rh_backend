@@ -25,7 +25,7 @@ const pool = new Pool({
 // Configuration SMTP Outlook avec authentification
 const transporter = nodemailer.createTransport({
   host: 'smtp.office365.com',
-  port: 587,
+  port: 25,
   secure: false,
   auth: {
     user: "administration.STS@avocarbon.com",
