@@ -385,7 +385,7 @@ app.post('/api/demandes', async (req, res) => {
     type_demande,
     titre,
     date_depart,
-    date_retour,  // Pour les autorisations, ce sera null
+    date_retour,
     heure_depart,
     heure_retour,
     demi_journee,
@@ -399,34 +399,6 @@ app.post('/api/demandes', async (req, res) => {
     if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({ 
         error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
-      });
-    }
-
-    // VALIDATION SPÉCIFIQUE POUR LES AUTORISATIONS
-    if (type_demande === 'autorisation') {
-      // Pour les autorisations, on n'a besoin que de date_depart
-      // Pas besoin de date_retour (même jour)
-      
-      if (!heure_depart || !heure_retour) {
-        return res.status(400).json({ 
-          error: 'Pour une autorisation, les heures de départ et retour sont obligatoires' 
-        });
-      }
-      
-      // Validation que l'heure_retour est après heure_depart
-      if (heure_retour <= heure_depart) {
-        return res.status(400).json({ 
-          error: 'L\'heure de retour doit être après l\'heure de départ' 
-        });
-      }
-      
-      console.log(`Autorisation créée pour le ${date_depart} de ${heure_depart} à ${heure_retour}`);
-    }
-
-    // Pour les congés et missions, garder la validation de date_retour
-    if ((type_demande === 'conges' || type_demande === 'mission') && !date_retour) {
-      return res.status(400).json({ 
-        error: 'Pour les congés et missions, la date de retour est obligatoire' 
       });
     }
 
@@ -444,11 +416,7 @@ app.post('/api/demandes', async (req, res) => {
     const employe = employeResult.rows[0];
 
     // Convertir les chaînes vides en null pour les champs optionnels
-    // POUR LES AUTORISATIONS : date_retour doit être null
-    const dateRetourFinal = type_demande === 'autorisation' 
-      ? null  // Pas de date_retour pour les autorisations
-      : (date_retour && date_retour !== '' ? date_retour : null);
-      
+    const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
     const fraisDeplacementFinal = frais_deplacement && frais_deplacement !== '' ? parseFloat(frais_deplacement) : null;
@@ -467,7 +435,7 @@ app.post('/api/demandes', async (req, res) => {
         type_demande, 
         titre, 
         date_depart, 
-        dateRetourFinal,  // Null pour les autorisations
+        dateRetourFinal,
         heureDepartFinal, 
         heureRetourFinal, 
         demi_journee || false, 
@@ -479,17 +447,10 @@ app.post('/api/demandes', async (req, res) => {
     );
 
     const demandeId = insertResult.rows[0].id;
-    
-    console.log(`✅ Demande ${type_demande} créée avec ID: ${demandeId}`);
-    console.log(`   - Employé: ${employe.nom} ${employe.prenom}`);
-    console.log(`   - Date: ${date_depart}`);
-    if (type_demande === 'autorisation') {
-      console.log(`   - Heures: ${heure_depart} à ${heure_retour}`);
-    }
 
     // Envoyer email au responsable 1
     if (employe.mail_responsable1) {
-      const emailEnvoye = await envoyerEmailResponsable(
+      await envoyerEmailResponsable(
         employe,
         employe.mail_responsable1,
         demandeId,
@@ -507,12 +468,6 @@ app.post('/api/demandes', async (req, res) => {
           frais_deplacement: fraisDeplacementFinal 
         }
       );
-      
-      if (!emailEnvoye) {
-        console.warn(`⚠️ Email non envoyé au responsable 1: ${employe.mail_responsable1}`);
-      }
-    } else {
-      console.warn(`⚠️ Pas de responsable 1 pour l'employé ${employe.nom} ${employe.prenom}`);
     }
 
     res.json({ 
@@ -525,6 +480,7 @@ app.post('/api/demandes', async (req, res) => {
     res.status(500).json({ error: 'Erreur lors de la création de la demande: ' + err.message });
   }
 });
+
 // Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details) {
   const baseUrl = BASE_URL;
