@@ -32,12 +32,9 @@ const transporter = nodemailer.createTransport({
 // URL de base (backend déployé)
 const BASE_URL = 'https://hr-back.azurewebsites.net';
 
-// Chemin vers le template Word
-const TEMPLATE_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 // Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
-const TEMPLATE_DEMISSION_PATH = path.join(__dirname, 'templates', 'Attestation de demission Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
@@ -59,19 +56,12 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
-
-
-
-
-
 // Helper : générer une référence unique
 function genererReference(nom, prenom) {
   const now = new Date();
   
-  // Premier caractère du prénom (ou nom si prénom vide)
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
   
-  // Format date: DDMMYYYYHHMMSS
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
   const annee = now.getFullYear();
@@ -82,23 +72,10 @@ function genererReference(nom, prenom) {
   return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
 
-
-
-
-
-// Helper : formatage simple de date (sans heure)
-function formatDateShort(date) {
-  if (!date) return '';
-  const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return date;
-  return d.toDateString();
-}
-
 // Helper : formatage date française (JJ/MM/AAAA)
 function formatDateFR(date) {
   if (!date) return '';
   
-  // Si c'est déjà une chaîne au format JJ/MM/AAAA, la retourner telle quelle
   if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
     return date;
   }
@@ -113,6 +90,14 @@ function formatDateFR(date) {
   return `${jour}/${mois}/${annee}`;
 }
 
+// Helper : formatage simple de date (sans heure)
+function formatDateShort(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return date;
+  return d.toDateString();
+}
+
 // Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
@@ -122,6 +107,54 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
     return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
   }
   return type_conge;
+}
+
+// Fonction pour générer une attestation de travail Word
+async function genererAttestationTravailWord(employe) {
+  try {
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_TRAVAIL_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
+    const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
+    
+    // Générer la référence
+    const reference = genererReference(employe.nom, employe.prenom);
+    
+    // Données à injecter dans le template
+    const data = {
+      reference: reference,
+      nom_complet: `${employe.nom} ${employe.prenom}`,
+      date_naissance: formatDateFR(employe.date_naissance || ''),
+      cin: employe.cin || '',
+      date_debut: formatDateFR(employe.date_debut),
+      poste: employe.poste || '',
+      date_actuelle: formatDateFR(new Date())
+    };
+    
+    // Générer le document Word
+    const reportBuffer = await createReport({
+      template: templateBuffer,
+      data,
+      cmdDelimiter: ['{{', '}}'],
+      additionalJsContext: {
+        uppercase: (str) => str ? str.toUpperCase() : '',
+        lowercase: (str) => str ? str.toLowerCase() : '',
+        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
+      }
+    });
+    
+    return reportBuffer;
+    
+  } catch (error) {
+    console.error('Erreur lors de la génération Word:', error);
+    throw error;
+  }
 }
 
 // Fonction pour générer une attestation de salaire Word
@@ -138,13 +171,13 @@ async function genererAttestationSalaireWord(employe) {
     // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
     
-    // Formater le salaire avec séparateur de milliers
+    // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
       return parseFloat(salaire).toLocaleString('fr-TN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2
-      }).replace(/,/g, ' '); // Remplacer la virgule par un espace pour les milliers
+      }).replace(/,/g, ' ');
     };
     
     // Générer la référence
@@ -152,14 +185,13 @@ async function genererAttestationSalaireWord(employe) {
     
     // Données à injecter dans le template
     const data = {
-      reference: reference,  // <-- Ajout de la référence
+      reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
       cin: employe.cin || '',
       date_debut: formatDateFR(employe.date_debut),
       poste: employe.poste || '',
       salaire: formaterSalaire(employe.salaire_brute),
       date_actuelle: formatDateFR(new Date())
-      // Note: {{annee_date_actuelle}} n'est plus utilisé dans le template
     };
     
     // Générer le document Word
@@ -167,61 +199,6 @@ async function genererAttestationSalaireWord(employe) {
       template: templateBuffer,
       data,
       cmdDelimiter: ['{{', '}}'],
-      // Options supplémentaires pour préserver le formatage
-      additionalJsContext: {
-        uppercase: (str) => str ? str.toUpperCase() : '',
-        lowercase: (str) => str ? str.toLowerCase() : '',
-        capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
-      }
-    });
-    
-    return reportBuffer;
-    
-  } catch (error) {
-    console.error('Erreur lors de la génération Word:', error);
-    throw error;
-  }
-}
-
-
-
-
-
-
-// Fonction pour générer une attestation Word
-async function genererAttestationWord(employe) {
-  try {
-    // Vérifier si le template existe
-    try {
-      await fs.access(TEMPLATE_PATH);
-    } catch (error) {
-      console.error(`Template non trouvé: ${TEMPLATE_PATH}`);
-      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
-    }
-    
-    // Lire le template Word
-    const templateBuffer = await fs.readFile(TEMPLATE_PATH);
-    
-    // Générer la référence
-    const reference = genererReference(employe.nom, employe.prenom);
-    
-    // Données à injecter dans le template
-    const data = {
-      reference: reference,  // <-- Ajout de la référence
-      nom_complet: `${employe.nom} ${employe.prenom}`,
-      date_naissance: formatDateFR(employe.date_naissance || ''),
-      cin: employe.cin || '',
-      date_debut: formatDateFR(employe.date_debut),
-      poste: employe.poste || '',
-      date_actuelle: formatDateFR(new Date())
-    };
-    
-    // Générer le document Word
-    const reportBuffer = await createReport({
-      template: templateBuffer,
-      data,
-      cmdDelimiter: ['{{', '}}'],
-      // Options supplémentaires pour préserver le formatage
       additionalJsContext: {
         uppercase: (str) => str ? str.toUpperCase() : '',
         lowercase: (str) => str ? str.toLowerCase() : '',
@@ -245,7 +222,7 @@ app.get('/api/employees/actifs', async (req, res) => {
     const result = await pool.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
               mail_responsable1, mail_responsable2, date_debut,
-              date_naissance, cin
+              date_naissance, cin, salaire_brute
        FROM employees 
        WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
@@ -269,7 +246,7 @@ app.post('/api/generer-attestation', async (req, res) => {
       });
     }
 
-    // Récupérer les informations de l'employé (INCLURE LE SALAIRE)
+    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
@@ -298,13 +275,9 @@ app.post('/api/generer-attestation', async (req, res) => {
           error: 'Salaire non disponible pour cet employé' 
         });
       }
-    } else if (type_document === 'lettre_demission') {
-      wordBuffer = await genererDemissionWord(employe);
-      fileName = `Lettre_Demission_${employe.nom}_${employe.prenom}.docx`;
-      documentTypeLabel = 'Lettre de démission';
     } else {
       // Par défaut, attestation de travail
-      wordBuffer = await genererAttestationWord(employe);
+      wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
@@ -362,7 +335,7 @@ app.post('/api/generer-attestation', async (req, res) => {
   }
 });
 
-// Route pour télécharger l'attestation directement (optionnel)
+// Route pour télécharger l'attestation directement (UNE SEULE ROUTE)
 app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
@@ -390,44 +363,9 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
     } else {
-      wordBuffer = await genererAttestationWord(employe);
+      wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
-    
-    // Envoyer le fichier Word en téléchargement
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.send(wordBuffer);
-
-  } catch (error) {
-    console.error('Erreur:', error);
-    res.status(500).json({ error: 'Erreur lors de la génération du document' });
-  }
-});
-
-// Route pour télécharger l'attestation directement (optionnel)
-app.post('/api/telecharger-attestation', async (req, res) => {
-  const { employe_id } = req.body;
-
-  try {
-    if (!employe_id) {
-      return res.status(400).json({ error: 'ID employé requis' });
-    }
-
-    const employeResult = await pool.query(
-      `SELECT nom, prenom, poste, date_debut, date_naissance, cin
-       FROM employees WHERE id = $1`,
-      [employe_id]
-    );
-
-    if (employeResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Employé non trouvé' });
-    }
-
-    const employe = employeResult.rows[0];
-    const wordBuffer = await genererAttestationWord(employe);
-    
-    const fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     
     // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -982,7 +920,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande (avec noms des responsables dans les mails)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -1121,7 +1059,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
-// Refuser une demande (avec nom du responsable qui refuse)
+// Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
@@ -1146,7 +1084,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
 
-    // Mettre à jour le champ approuve_responsable à FALSE selon le niveau
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
@@ -1239,5 +1176,4 @@ app.listen(PORT, () => {
   console.log(`👥 API Employés: http://localhost:${PORT}/api/employees/actifs`);
   console.log(`📋 API Demandes: http://localhost:${PORT}/api/demandes`);
   console.log(`📄 API Attestations Word: http://localhost:${PORT}/api/generer-attestation`);
-  console.log(`📁 Assurez-vous d'avoir le template Word dans: ${TEMPLATE_PATH}`);
 });
