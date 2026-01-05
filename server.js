@@ -16,7 +16,7 @@ const pool = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
   database: process.env.DB_NAME || 'rh_application',
-  password: process.env.DB_PASSWORD || 'St$@0987',
+  password: process.env.DB_PASS || 'St$@0987',
   port: process.env.DB_PORT || 5432,
   ssl: { rejectUnauthorized: false }
 });
@@ -674,8 +674,8 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable
-async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details) {
+// Fonction pour envoyer email au responsable (MODIFIÉE)
+async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
@@ -709,15 +709,15 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   }
 
-  // Si on écrit au responsable 2, préciser que R1 a déjà approuvé
-  let infoNiveauHtml = '';
-  if (niveau === 2 && employe.mail_responsable1) {
-    const resp1 = extraireNomPrenomDepuisEmail(employe.mail_responsable1);
-    infoNiveauHtml = `
-      <p style="margin-top:10px;">
-        Cette demande a déjà été approuvée par 
-        <strong>${resp1.fullName}</strong> (Responsable niveau 1).
-      </p>
+  // Si c'est pour le deuxième responsable après approbation du premier
+  let infoPremierApprobation = '';
+  if (premierResponsable && niveau === 2) {
+    infoPremierApprobation = `
+      <div style="background: #d1fae5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #10b981;">
+        <p style="margin: 0; color: #065f46;">
+          <strong>✓ Cette demande a déjà été approuvée par ${premierResponsable}</strong>
+        </p>
+      </div>
     `;
   }
 
@@ -727,13 +727,13 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       address: 'administration.STS@avocarbon.com'
     },
     to: emailResponsable,
-    subject: `Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
+    subject: `${niveau === 2 && premierResponsable ? '✓ ' : ''}Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
-          Demande RH en attente d'approbation
+          ${niveau === 2 && premierResponsable ? 'Demande approuvée par le premier responsable - ' : ''}Demande RH en attente d'approbation
         </h2>
-        ${infoNiveauHtml}
+        ${infoPremierApprobation}
         <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
           <p><strong>Poste:</strong> ${employe.poste}</p>
@@ -745,7 +745,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
           <a href="${lienApprobation}" 
              style="display: inline-block; padding: 12px 30px; background-color: #2563eb; color: white; 
                     text-decoration: none; border-radius: 6px; font-weight: bold;">
-            Voir et traiter la demande
+            ${niveau === 2 && premierResponsable ? 'Donner votre approbation finale' : 'Voir et traiter la demande'}
           </a>
         </div>
         <p style="color: #6b7280; font-size: 14px; text-align: center;">
@@ -816,6 +816,10 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
+    // Noms des responsables
+    const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
+    const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
+    
     // Échapper les apostrophes dans les chaînes JavaScript
     const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
     const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
@@ -923,6 +927,18 @@ app.get('/approuver-demande', async (req, res) => {
             font-size: 14px;
             font-weight: 500;
           }
+          .approval-notice {
+            background: #d1fae5;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #10b981;
+          }
+          .approval-notice p {
+            margin: 0;
+            color: #065f46;
+            font-weight: 600;
+          }
         </style>
       </head>
       <body>
@@ -931,6 +947,12 @@ app.get('/approuver-demande', async (req, res) => {
             <h1>📋 Demande RH - Approbation</h1>
             <div class="status-badge">En attente de validation</div>
           </div>
+          
+          ${niveau == 2 && demande.mail_responsable1 ? `
+          <div class="approval-notice">
+            <p>✓ Cette demande a été approuvée par ${resp1 ? resp1.fullName : 'le premier responsable'}</p>
+          </div>
+          ` : ''}
           
           <div class="info-grid">
             <div class="info-item">
@@ -1186,7 +1208,6 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
-
       // Email à l'employé : approuvé par R1, en attente de R2
       await sendEmailWithRetry({
         from: {
@@ -1210,7 +1231,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         `
       }, 'Approbation niveau 1');
 
-      // Email au responsable 2
+      // Email au responsable 2 avec mention du premier approbateur
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1227,7 +1248,8 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           type_conge: demande.type_conge,
           type_conge_autre: demande.type_conge_autre,
           frais_deplacement: demande.frais_deplacement
-        }
+        },
+        resp1 ? resp1.fullName : 'le premier responsable'  // ← NOUVEAU PARAMÈTRE
       );
       
       return res.json({ 
