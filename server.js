@@ -1326,7 +1326,7 @@ await sendEmailWithRetry({
 }, 'Approbation finale à employé');
 
 // ==================== EMAIL À L'ÉQUIPE RH ====================
-const emailRh = 'fethi.chaouachi@avocarbon.com';
+const emailRh = 'majed.messai@avocarbon.com';
 
 // Formatage des détails pour l'email RH
 let detailsRh = `
