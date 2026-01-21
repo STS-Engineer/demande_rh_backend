@@ -1324,7 +1324,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'majed.messai@avocarbon.com',
+      to: 'fethi.chaouachi@avocarbon.com',
       subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
@@ -1358,21 +1358,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
           </div>
           
-          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #10b981;">
-            <h3 style="color: #374151; margin-top: 0;">✅ Statut d'Approbation</h3>
-            <p><strong>Statut:</strong> <span style="color: #10b981; font-weight: 600;">APPROUVÉE</span></p>
-            ${approuveur ? `<p><strong>Approuvée par:</strong> ${approuveur.fullName}</p>` : ''}
-            ${demande.mail_responsable1 ? `<p><strong>Responsable 1:</strong> ${resp1 ? resp1.fullName : demande.mail_responsable1}</p>` : ''}
-            ${demande.mail_responsable2 ? `<p><strong>Responsable 2:</strong> ${resp2 ? resp2.fullName : demande.mail_responsable2}</p>` : ''}
-            <p><strong>Date de la demande:</strong> ${formatDateShort(demande.created_at)}</p>
-            <p><strong>Date d'approbation:</strong> ${formatDateShort(new Date())}</p>
-          </div>
+        
           
-          <div style="background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
-            <p style="margin: 0; color: #92400e;">
-              <strong>⚠️ Action requise:</strong> Veuillez procéder au suivi administratif nécessaire pour cette demande approuvée.
-            </p>
-          </div>
+          
           
           <p style="color: #6b7280; font-size: 14px; margin-top: 30px; text-align: center;">
             Cet email est envoyé automatiquement par le système de gestion RH
