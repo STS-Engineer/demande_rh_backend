@@ -1258,197 +1258,58 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       });
     } 
 
-  // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
-await pool.query(
-  `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
-  [id]
-);
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
+    await pool.query(
+      `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
+      [id]
+    );
 
-// Qui est l'approbateur final ?
-let approuveur = null;
-if (niveau == 1 && !demande.mail_responsable2) {
-  approuveur = resp1; // seul responsable
-} else if (niveau == 2) {
-  approuveur = resp2; // deuxième approbation
-}
+    // Qui est l'approbateur final ?
+    let approuveur = null;
+    if (niveau == 1 && !demande.mail_responsable2) {
+      approuveur = resp1; // seul responsable
+    } else if (niveau == 2) {
+      approuveur = resp2; // deuxième approbation
+    }
 
-const typeCongeLabel = demande.type_demande === 'conges'
-  ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
-  : null;
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
 
-// ==================== EMAIL À L'EMPLOYÉ ====================
-await sendEmailWithRetry({
-  from: {
-    name: 'Administration STS',
-    address: 'administration.STS@avocarbon.com'
-  },
-  to: demande.adresse_mail,
-  subject: `✅ Votre demande RH a été approuvée - ${demande.titre}`,
-  html: `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #10b981; border-bottom: 2px solid #10b981; padding-bottom: 10px;">
-        ✅ Demande RH approuvée
-      </h2>
-      <div style="background: #f0fdf4; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #10b981;">
-        <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-        <p>Nous avons le plaisir de vous informer que votre demande RH a été <strong style="color: #10b981;">définitivement approuvée</strong>.</p>
-        
-        <div style="background: white; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #d1fae5;">
-          <h3 style="color: #374151; margin-top: 0;">📋 Détails de la demande</h3>
-          <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-          <p><strong>Titre:</strong> ${demande.titre}</p>
-          <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-          ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
-          ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
-          ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
-          ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
-          ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
-        </div>
-        
-        ${approuveur ? `
-        <div style="background: #e0f2fe; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #0ea5e9;">
-          <p><strong>✅ Approbation finale:</strong> La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>
-        </div>
-        ` : ''}
-        
-        <p style="color: #374151; font-size: 15px;">
-          Votre demande est maintenant officiellement enregistrée. Vous pouvez la consulter dans votre espace personnel.
-        </p>
-      </div>
-      
-      <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
-        <p style="color: #6b7280; font-size: 14px;">
-          Ceci est un email automatique. Merci de ne pas y répondre.
-        </p>
-      </div>
-    </div>
-  `
-}, 'Approbation finale à employé');
-
-// ==================== EMAIL À L'ÉQUIPE RH ====================
-const emailRh = 'majed.messai@avocarbon.com';
-
-// Formatage des détails pour l'email RH
-let detailsRh = `
-  <tr>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Employé:</strong></td>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${demande.nom} ${demande.prenom}</td>
-  </tr>
-  <tr>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Type de demande:</strong></td>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</td>
-  </tr>
-  <tr>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Titre:</strong></td>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${demande.titre}</td>
-  </tr>
-  <tr>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Date de départ:</strong></td>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${formatDateShort(demande.date_depart)}</td>
-  </tr>
-`;
-
-if (demande.date_retour) {
-  detailsRh += `
-    <tr>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Date de retour:</strong></td>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${formatDateShort(demande.date_retour)}</td>
-    </tr>
-  `;
-}
-
-if (demande.type_demande === 'conges') {
-  detailsRh += `
-    <tr>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Type de congé:</strong></td>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${typeCongeLabel}</td>
-    </tr>
-  `;
-}
-
-if (approuveur) {
-  detailsRh += `
-    <tr>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Approuvé par:</strong></td>
-      <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${approuveur.fullName}</td>
-    </tr>
-  `;
-}
-
-detailsRh += `
-  <tr>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Date d'approbation:</strong></td>
-    <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">${formatDateFR(new Date())}</td>
-  </tr>
-  <tr>
-    <td style="padding: 8px 0;"><strong>Référence demande:</strong></td>
-    <td style="padding: 8px 0;"><strong style="color: #2563eb;">${id}</strong></td>
-  </tr>
-`;
-
-await sendEmailWithRetry({
-  from: {
-    name: 'Système Gestion RH - STS',
-    address: 'administration.STS@avocarbon.com'
-  },
-  to: emailRh,
-  cc: emailRh, // Pour s'assurer que l'email est bien reçu
-  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom} - ID: ${id}`,
-  html: `
-    <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 25px; border-radius: 10px 10px 0 0;">
-        <h1 style="color: white; margin: 0; text-align: center; font-size: 24px;">
-          📋 Notification - Demande RH approuvée
-        </h1>
-      </div>
-      
-      <div style="padding: 30px; background: #f8fafc; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb;">
-        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
-          <h2 style="color: #10b981; margin-top: 0; padding-bottom: 15px; border-bottom: 2px solid #10b981;">
-            ✅ Demande définitivement approuvée
-          </h2>
-          
-          <p style="color: #374151; font-size: 16px; margin-bottom: 25px;">
-            Une nouvelle demande RH vient d'être approuvée définitivement et nécessite votre suivi.
-          </p>
-          
-          <h3 style="color: #374151; margin-bottom: 20px;">📊 Informations de la demande</h3>
-          
-          <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px;">
-            ${detailsRh}
-          </table>
-          
-          <div style="background: #fffbeb; padding: 20px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 25px 0;">
-            <h4 style="color: #92400e; margin-top: 0;">📝 Action requise</h4>
-            <p style="color: #92400e; margin: 0;">
-              Cette demande est maintenant officiellement approuvée. Veuillez la traiter dans votre système RH et mettre à jour les états concernés.
-            </p>
-          </div>
-          
-          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-            <p style="color: #6b7280; font-size: 14px; text-align: center;">
-              <strong>Date d'envoi:</strong> ${new Date().toLocaleDateString('fr-FR', { 
-                weekday: 'long', 
-                year: 'numeric', 
-                month: 'long', 
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit'
-              })}
-            </p>
+    // Email final à l'employé
+    await sendEmailWithRetry({
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: demande.adresse_mail,
+      subject: 'Votre demande RH a été définitivement approuvée',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
+          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${formatDateShort(demande.date_depart)}</strong> a été <strong>approuvée</strong>.</p>
+            ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
+            <p><strong>Motif:</strong> ${demande.titre}</p>
+            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
           </div>
         </div>
-      </div>
-      
-      <div style="text-align: center; margin-top: 30px; padding: 15px; color: #6b7280; font-size: 12px;">
-        <p>Système de Gestion des Demandes RH - AVO CARBON</p>
-        <p>Ceci est un email automatique, merci de ne pas y répondre.</p>
-      </div>
-    </div>
-  `
-}, 'Notification RH approbation finale');
+      `
+    }, 'Approbation finale demande');
 
-console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
+    console.log(`✅ Demande ${id} complètement approuvée`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Demande complètement approuvée' 
+    });
+  } catch (err) {
+    console.error('❌ Erreur approbation demande:', err);
+    res.status(500).json({ error: 'Erreur lors de l\'approbation' });
+  }
+});
+
 // Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
