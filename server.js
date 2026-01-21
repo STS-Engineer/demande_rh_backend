@@ -1258,6 +1258,11 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       });
     } 
 
+// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
+
+// Remplacez la section "CAS 2 : Demande complètement approuvée" dans app.post('/api/demandes/:id/approuver')
+// À partir de la ligne "// CAS 2 : Demande complètement approuvée"
+
     // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
     await pool.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
@@ -1276,7 +1281,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // Email final à l'employé
+    // ==================== EMAILS D'APPROBATION FINALE ====================
+    
+    // 1. Email à l'employé
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
@@ -1293,23 +1300,96 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
             <p><strong>Motif:</strong> ${demande.titre}</p>
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
+            ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
           </div>
+          <p style="color: #6b7280; font-size: 14px;">
+            Vous pouvez désormais procéder selon les modalités convenues.
+          </p>
         </div>
       `
-    }, 'Approbation finale demande');
+    }, 'Approbation finale à l\'employé');
 
-    console.log(`✅ Demande ${id} complètement approuvée`);
+    // 2. Email à l'équipe RH avec toutes les informations
+    const emailRH = 'fethi.chaouachi@avocarbon.com';
+    
+    // Construction des détails selon le type de demande
+    let detailsDemandeHTML = `
+      <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <h3 style="color: #1f2937; margin-top: 0;">📋 Informations de l'employé</h3>
+        <p><strong>Nom complet:</strong> ${demande.nom} ${demande.prenom}</p>
+        <p><strong>Poste:</strong> ${demande.poste || 'Non spécifié'}</p>
+        <p><strong>Email:</strong> ${demande.adresse_mail}</p>
+        
+        <h3 style="color: #1f2937; margin-top: 20px;">📅 Détails de la demande</h3>
+        <p><strong>Type de demande:</strong> ${demande.type_demande}</p>
+        <p><strong>Motif:</strong> ${demande.titre}</p>
+        <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
+    `;
+
+    // Ajouter les détails spécifiques selon le type de demande
+    if (demande.type_demande === 'conges') {
+      detailsDemandeHTML += `
+        <p><strong>Date de retour:</strong> ${demande.date_retour ? formatDateShort(demande.date_retour) : 'Non spécifié'}</p>
+        <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
+        <p><strong>Demi-journée:</strong> ${demande.demi_journee ? 'Oui' : 'Non'}</p>
+      `;
+    } else if (demande.type_demande === 'autorisation') {
+      detailsDemandeHTML += `
+        <p><strong>Heure de départ:</strong> ${demande.heure_depart || 'Non spécifié'}</p>
+        <p><strong>Heure de retour:</strong> ${demande.heure_retour || 'Non spécifié'}</p>
+      `;
+    } else if (demande.type_demande === 'mission') {
+      detailsDemandeHTML += `
+        <p><strong>Date de retour:</strong> ${demande.date_retour ? formatDateShort(demande.date_retour) : 'Non spécifié'}</p>
+        <p><strong>Heure de sortie:</strong> ${demande.heure_depart || 'Non spécifié'}</p>
+        <p><strong>Heure de retour:</strong> ${demande.heure_retour || 'Non spécifié'}</p>
+        <p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement || 0} TND</p>
+      `;
+    }
+
+    detailsDemandeHTML += `
+        <h3 style="color: #1f2937; margin-top: 20px;">✅ Validation</h3>
+        <p><strong>Statut:</strong> <span style="color: #10b981; font-weight: bold;">APPROUVÉE</span></p>
+        ${demande.mail_responsable1 && resp1 ? `<p><strong>Approuvé par (Niveau 1):</strong> ${resp1.fullName} (${demande.mail_responsable1})</p>` : ''}
+        ${demande.mail_responsable2 && resp2 && niveau == 2 ? `<p><strong>Approuvé par (Niveau 2):</strong> ${resp2.fullName} (${demande.mail_responsable2})</p>` : ''}
+        <p><strong>Date d'approbation finale:</strong> ${formatDateShort(new Date())}</p>
+      </div>
+    `;
+
+    await sendEmailWithRetry({
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: emailRH,
+      subject: `✅ Demande RH approuvée - ${demande.nom} ${demande.prenom} - ${demande.type_demande}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
+          <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 20px; border-radius: 8px 8px 0 0;">
+            <h2 style="color: white; margin: 0;">✅ Nouvelle demande RH approuvée</h2>
+          </div>
+          
+          ${detailsDemandeHTML}
+          
+          <div style="background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
+            <p style="margin: 0; color: #92400e;">
+              <strong>⚠️ Action requise:</strong> Veuillez procéder aux démarches administratives nécessaires.
+            </p>
+          </div>
+          
+          <p style="color: #6b7280; font-size: 14px; text-align: center; margin-top: 30px;">
+            Cet email a été généré automatiquement par le système de gestion RH
+          </p>
+        </div>
+      `
+    }, 'Notification RH approbation finale');
+
+    console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
     res.json({ 
       success: true, 
-      message: 'Demande complètement approuvée' 
+      message: 'Demande complètement approuvée et notifications envoyées' 
     });
-  } catch (err) {
-    console.error('❌ Erreur approbation demande:', err);
-    res.status(500).json({ error: 'Erreur lors de l\'approbation' });
-  }
-});
-
 // Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
