@@ -1367,7 +1367,7 @@ await sendEmailWithRetry({
     name: 'Administration STS',
     address: 'administration.STS@avocarbon.com'
   },
-  to: 'majed.messai@avocarbon.com',
+  to: 'fethi.chaouachi@avocarbon.com',
   subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
   html: `
 <!DOCTYPE html>
