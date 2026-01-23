@@ -93,7 +93,197 @@ function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
     mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
 }
-
+// Fonction pour générer un PDF de demande RH approuvée
+async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
+  const PDFDocument = require('pdfkit');
+  const fs = require('fs');
+  const path = require('path');
+  
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ 
+        size: 'A4', 
+        margin: 50,
+        info: {
+          Title: `Demande RH - ${demande.nom} ${demande.prenom}`,
+          Author: 'Administration STS',
+          Subject: 'Demande RH Approuvée'
+        }
+      });
+      
+      const chunks = [];
+      
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      
+      // En-tête avec logo/titre
+      doc.fontSize(24)
+         .fillColor('#1976d2')
+         .text('DEMANDE RH APPROUVÉE', { align: 'center' })
+         .moveDown();
+      
+      doc.fontSize(10)
+         .fillColor('#666')
+         .text(`Date d'approbation: ${formatDateFR(new Date())}`, { align: 'center' })
+         .moveDown(2);
+      
+      // Ligne séparatrice
+      doc.strokeColor('#1976d2')
+         .lineWidth(2)
+         .moveTo(50, doc.y)
+         .lineTo(545, doc.y)
+         .stroke()
+         .moveDown();
+      
+      // Section Informations Employé
+      doc.fontSize(16)
+         .fillColor('#1976d2')
+         .text('👤 INFORMATIONS EMPLOYÉ', { underline: true })
+         .moveDown(0.5);
+      
+      const employeInfo = [
+        { label: 'Nom complet', value: `${demande.nom} ${demande.prenom}` },
+        { label: 'Matricule', value: demande.matricule || 'Non spécifié' },
+        { label: 'Poste', value: demande.poste || 'Non spécifié' },
+        { label: 'Email', value: demande.adresse_mail }
+      ];
+      
+      doc.fontSize(11).fillColor('#333');
+      employeInfo.forEach(info => {
+        doc.font('Helvetica-Bold')
+           .text(`${info.label}: `, { continued: true })
+           .font('Helvetica')
+           .text(info.value)
+           .moveDown(0.3);
+      });
+      
+      doc.moveDown(1.5);
+      
+      // Ligne séparatrice
+      doc.strokeColor('#e0e0e0')
+         .lineWidth(1)
+         .moveTo(50, doc.y)
+         .lineTo(545, doc.y)
+         .stroke()
+         .moveDown(1);
+      
+      // Section Détails de la Demande
+      doc.fontSize(16)
+         .fillColor('#1976d2')
+         .text('📋 DÉTAILS DE LA DEMANDE', { underline: true })
+         .moveDown(0.5);
+      
+      const typeDemandeLabel = demande.type_demande === 'conges' 
+        ? 'Congé' 
+        : demande.type_demande === 'autorisation' 
+          ? 'Autorisation' 
+          : 'Mission';
+      
+      const typeCongeLabel = demande.type_demande === 'conges'
+        ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+        : null;
+      
+      const demandeInfo = [
+        { label: 'Type de demande', value: typeDemandeLabel },
+        { label: 'Motif', value: demande.titre },
+        { label: 'Date de départ', value: formatDateFR(demande.date_depart) }
+      ];
+      
+      if (demande.date_retour) {
+        demandeInfo.push({ 
+          label: 'Date de retour', 
+          value: formatDateFR(demande.date_retour) 
+        });
+      }
+      
+      if (demande.type_demande === 'conges' && joursOuvres > 0) {
+        demandeInfo.push({ 
+          label: 'Nombre de jours ouvrés', 
+          value: `${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}`,
+          highlight: true
+        });
+      }
+      
+      if (typeCongeLabel) {
+        demandeInfo.push({ label: 'Type de congé', value: typeCongeLabel });
+      }
+      
+      if (demande.demi_journee) {
+        demandeInfo.push({ label: 'Demi-journée', value: 'Oui' });
+      }
+      
+      if (demande.heure_depart) {
+        demandeInfo.push({ label: 'Heure de départ', value: demande.heure_depart });
+      }
+      
+      if (demande.heure_retour) {
+        demandeInfo.push({ label: 'Heure de retour', value: demande.heure_retour });
+      }
+      
+      if (demande.frais_deplacement) {
+        demandeInfo.push({ 
+          label: 'Frais de déplacement', 
+          value: `${demande.frais_deplacement} TND` 
+        });
+      }
+      
+      doc.fontSize(11).fillColor('#333');
+      demandeInfo.forEach(info => {
+        if (info.highlight) {
+          doc.fillColor('#1976d2');
+        }
+        doc.font('Helvetica-Bold')
+           .text(`${info.label}: `, { continued: true })
+           .font('Helvetica')
+           .text(info.value);
+        
+        if (info.highlight) {
+          doc.fillColor('#333');
+        }
+        doc.moveDown(0.3);
+      });
+      
+      doc.moveDown(2);
+      
+      // Ligne séparatrice
+      doc.strokeColor('#e0e0e0')
+         .lineWidth(1)
+         .moveTo(50, doc.y)
+         .lineTo(545, doc.y)
+         .stroke()
+         .moveDown(1);
+      
+      // Section Statut d'approbation
+      doc.fontSize(16)
+         .fillColor('#10b981')
+         .text('✅ STATUT D\'APPROBATION', { underline: true })
+         .moveDown(0.5);
+      
+      doc.fontSize(12)
+         .fillColor('#065f46')
+         .font('Helvetica-Bold')
+         .text('Cette demande a été approuvée par les responsables hiérarchiques.')
+         .moveDown(1);
+      
+      // Pied de page
+      const pageHeight = doc.page.height;
+      doc.fontSize(9)
+         .fillColor('#999')
+         .text(
+           'Document généré automatiquement par le système de gestion RH - Administration STS',
+           50,
+           pageHeight - 50,
+           { align: 'center', width: 495 }
+         );
+      
+      doc.end();
+      
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
 // Fonction améliorée pour envoyer des emails avec retry et fallback
 async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError;
@@ -1362,14 +1552,30 @@ if (demande.type_demande === 'conges' && demande.date_retour) {
 }
 
 // 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
-await sendEmailWithRetry({
-  from: {
-    name: 'Administration STS',
-    address: 'administration.STS@avocarbon.com'
-  },
-  to: 'fethi.chaouachi@avocarbon.com',
-  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-  html: `
+try {
+  // Générer le PDF
+  const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
+  const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().toISOString().split('T')[0]}.pdf`;
+  
+  console.log(`📄 PDF généré: ${pdfFileName} (${pdfBuffer.length} octets)`);
+  
+  // Optimiser les pièces jointes
+  const optimizedAttachments = await optimizeAttachments([
+    {
+      filename: pdfFileName,
+      content: pdfBuffer,
+      contentType: 'application/pdf'
+    }
+  ]);
+  
+  await sendEmailWithRetry({
+    from: {
+      name: 'Administration STS',
+      address: 'administration.STS@avocarbon.com'
+    },
+    to: 'fethi.chaouachi@avocarbon.com',
+    subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+    html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -1388,6 +1594,7 @@ await sendEmailWithRetry({
     <div style="padding: 30px;">
       <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
         <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
+        <p style="margin: 10px 0 0 0; color: #1565c0; font-weight: 500;">📎 Un PDF détaillé est joint à cet email.</p>
       </div>
       
       <!-- Informations Employé -->
@@ -1458,6 +1665,10 @@ await sendEmailWithRetry({
           <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
         </tr>` : ''}
       </table>
+      
+      <div style="background-color: #f0fdf4; border-left: 4px solid #10b981; padding: 15px; margin: 20px 0; border-radius: 4px;">
+        <p style="margin: 0; color: #065f46; font-weight: 600;">📎 Consultez le PDF joint pour tous les détails de cette demande.</p>
+      </div>
     </div>
     
     <!-- Pied de page -->
@@ -1469,9 +1680,11 @@ await sendEmailWithRetry({
   </div>
 </body>
 </html>
-  `
-}, 'Notification RH - Demande approuvée');
-
+    `,
+    attachments: optimizedAttachments
+  }, 'Notification RH - Demande approuvée avec PDF');
+  
+  console.log(`✅ Email RH envoyé avec PDF joint: ${pdfFileName}`);
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
     res.json({ 
