@@ -1573,7 +1573,7 @@ try {
       name: 'Administration STS',
       address: 'administration.STS@avocarbon.com'
     },
-    to: 'fethi.chaouachi@avocarbon.com',
+    to: 'majed.messai@avocarbon.com',
     subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
     html: `
 <!DOCTYPE html>
