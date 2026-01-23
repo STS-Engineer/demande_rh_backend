@@ -42,57 +42,6 @@ const createTransporter = () => {
     socketTimeout: 15000
   });
 };
-
-// Pool de transporteurs SMTP pour une meilleure fiabilité
-const emailPool = {
-  transporters: [],
-  currentIndex: 0,
-  maxRetries: 3,
-  
-  init: function(count = 3) {
-    for (let i = 0; i < count; i++) {
-      this.transporters.push(createTransporter());
-    }
-    console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
-  },
-  
-  getTransporter: function() {
-    const transporter = this.transporters[this.currentIndex];
-    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
-    return transporter;
-  },
-  
-  rotateTransporter: function() {
-    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
-    return this.getTransporter();
-  }
-};
-
-// Initialisation du pool
-emailPool.init(3);
-
-// Fonction pour vérifier la connexion SMTP
-async function verifySMTPConnection() {
-  for (let i = 0; i < emailPool.transporters.length; i++) {
-    try {
-      await emailPool.transporters[i].verify();
-      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
-    } catch (error) {
-      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
-    }
-  }
-}
-
-// Fonction pour logger les détails d'envoi d'email
-function logEmailDetails(mailOptions, context, attempt = 1) {
-  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
-  console.log(`   Contexte: ${context}`);
-  console.log(`   Destinataire: ${mailOptions.to}`);
-  console.log(`   Sujet: ${mailOptions.subject}`);
-  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
-  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
-    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
-}
 // Fonction pour générer un PDF de demande RH approuvée
 async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
   const PDFDocument = require('pdfkit');
@@ -284,6 +233,57 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
     }
   });
 }
+// Pool de transporteurs SMTP pour une meilleure fiabilité
+const emailPool = {
+  transporters: [],
+  currentIndex: 0,
+  maxRetries: 3,
+  
+  init: function(count = 3) {
+    for (let i = 0; i < count; i++) {
+      this.transporters.push(createTransporter());
+    }
+    console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
+  },
+  
+  getTransporter: function() {
+    const transporter = this.transporters[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+    return transporter;
+  },
+  
+  rotateTransporter: function() {
+    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+    return this.getTransporter();
+  }
+};
+
+// Initialisation du pool
+emailPool.init(3);
+
+// Fonction pour vérifier la connexion SMTP
+async function verifySMTPConnection() {
+  for (let i = 0; i < emailPool.transporters.length; i++) {
+    try {
+      await emailPool.transporters[i].verify();
+      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
+    } catch (error) {
+      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+    }
+  }
+}
+
+// Fonction pour logger les détails d'envoi d'email
+function logEmailDetails(mailOptions, context, attempt = 1) {
+  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
+  console.log(`   Contexte: ${context}`);
+  console.log(`   Destinataire: ${mailOptions.to}`);
+  console.log(`   Sujet: ${mailOptions.subject}`);
+  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
+  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
+    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
+}
+
 // Fonction améliorée pour envoyer des emails avec retry et fallback
 async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError;
@@ -1552,6 +1552,7 @@ if (demande.type_demande === 'conges' && demande.date_retour) {
 }
 
 // 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
+// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée avec PDF
 try {
   // Générer le PDF
   const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
@@ -1573,7 +1574,7 @@ try {
       name: 'Administration STS',
       address: 'administration.STS@avocarbon.com'
     },
-    to: 'majed.messai@avocarbon.com',
+    to: 'fethi.chaouachi@avocarbon.com',
     subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
     html: `
 <!DOCTYPE html>
@@ -1685,18 +1686,20 @@ try {
   }, 'Notification RH - Demande approuvée avec PDF');
   
   console.log(`✅ Email RH envoyé avec PDF joint: ${pdfFileName}`);
-    console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Demande complètement approuvée et notifications envoyées' 
-    });
-  } catch (err) {
-    console.error('❌ Erreur approbation demande:', err);
-    res.status(500).json({ error: 'Erreur lors de l\'approbation' });
-  }
-});
-
+  
+} catch (pdfError) {
+  console.error('❌ Erreur génération/envoi PDF:', pdfError);
+  // Continuer même si le PDF échoue - envoyer au moins l'email sans PDF
+  await sendEmailWithRetry({
+    from: {
+      name: 'Administration STS',
+      address: 'administration.STS@avocarbon.com'
+    },
+    to: 'fethi.chaouachi@avocarbon.com',
+    subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom} [Sans PDF]`,
+    html: `<!-- Même contenu HTML mais sans mention du PDF -->`
+  }, 'Notification RH - Sans PDF');
+}
 // Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
