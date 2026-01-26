@@ -21,29 +21,25 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ==================== CONFIGURATION SMTP CORRIGÉE ====================
+// ==================== CONFIGURATION SMTP AMÉLIORÉE ====================
+
 // Fonction pour créer un transporteur SMTP
 const createTransporter = () => {
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com',
     port: parseInt(process.env.SMTP_PORT) || 25,
-    secure: false, // Port 25 utilise STARTTLS, pas SSL direct
+    secure: process.env.SMTP_SECURE === 'true' || false,
     auth: {
       user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASSWORD || 'shnlgdyfbcztbhxn'
+      pass: process.env.SMTP_PASS || 'shnlgdyfbcztbhxn'
     },
     tls: {
-      rejectUnauthorized: false,
-      minVersion: 'TLSv1.2'
+      ciphers: 'SSLv3',
+      rejectUnauthorized: false
     },
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 30000,
-    pool: true,
-    maxConnections: 5,
-    maxMessages: 100,
-    logger: true,
-    debug: process.env.NODE_ENV !== 'production'
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000
   });
 };
 
@@ -91,27 +87,17 @@ async function verifySMTPConnection() {
 function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
   console.log(`   Contexte: ${context}`);
-  console.log(`   De: ${mailOptions.from.address || mailOptions.from}`);
-  console.log(`   À: ${mailOptions.to}`);
+  console.log(`   Destinataire: ${mailOptions.to}`);
   console.log(`   Sujet: ${mailOptions.subject}`);
   console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
-  if (mailOptions.attachments && mailOptions.attachments.length > 0) {
-    const totalSize = mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0);
-    console.log(`   Taille totale: ${Math.round(totalSize / 1024)}KB`);
-  }
+  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
+    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
 }
 
 // Fonction améliorée pour envoyer des emails avec retry et fallback
 async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError;
-  
-  // S'assurer que l'email FROM est correct
-  if (!mailOptions.from) {
-    mailOptions.from = {
-      name: 'Administration STS',
-      address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
-    };
-  }
+  let lastTransporterIndex = emailPool.currentIndex;
   
   logEmailDetails(mailOptions, context, 1);
   
@@ -119,10 +105,21 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     const transporter = emailPool.getTransporter();
     
     try {
+      // Limiter la taille des pièces jointes pour éviter les timeouts
+      if (mailOptions.attachments && mailOptions.attachments.length > 0) {
+        const totalSize = mailOptions.attachments.reduce((sum, att) => {
+          return sum + (att.content?.length || 0);
+        }, 0);
+        
+        if (totalSize > 10 * 1024 * 1024) { // 10MB max
+          console.warn(`⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
+        }
+      }
+      
       const info = await transporter.sendMail(mailOptions);
+      
       console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
       console.log(`   Message ID: ${info.messageId}`);
-      console.log(`   Response: ${info.response}`);
       
       return {
         success: true,
@@ -132,45 +129,47 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
       
     } catch (error) {
       lastError = error;
+      lastTransporterIndex = emailPool.currentIndex;
+      
       console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
       
-      // Log plus détaillé pour diagnostic
-      if (error.code) console.error(`   Code d'erreur: ${error.code}`);
-      if (error.command) console.error(`   Commande: ${error.command}`);
-      
       if (attempt < maxRetries) {
-        const baseDelay = 2000;
-        const maxDelay = 15000;
+        // Backoff exponentiel avec jitter
+        const baseDelay = 1000;
+        const maxDelay = 10000;
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         const jitter = Math.random() * 1000;
         const totalDelay = delay + jitter;
         
         console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
         
+        // Changer de transporteur pour la prochaine tentative
         emailPool.rotateTransporter();
+        
         await new Promise(resolve => setTimeout(resolve, totalDelay));
         
+        // Log de la nouvelle tentative
         logEmailDetails(mailOptions, context, attempt + 1);
       }
     }
   }
   
-  // Toutes les tentatives ont échoué - dernière tentative avec nouveau transporteur
-  console.error(`💥 Échec final après ${maxRetries} tentatives`);
+  // Toutes les tentatives ont échoué
+  console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
   
+  // Essayer de recréer un transporteur comme dernier recours
   try {
-    console.log('🔄 Tentative finale avec nouveau transporteur...');
+    console.log('🔄 Tentative avec nouveau transporteur...');
     const emergencyTransporter = createTransporter();
     const info = await emergencyTransporter.sendMail(mailOptions);
-    
     console.log('✅ Email envoyé avec transporteur d\'urgence');
+    
     return {
       success: true,
       messageId: info.messageId,
       attempt: 'emergency',
       warning: 'Sent with emergency transporter'
     };
-    
   } catch (emergencyError) {
     console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
     
@@ -184,17 +183,24 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 }
 
 // ==================== HELPER FUNCTIONS ====================
+
+// URL de base (backend déployé)
 const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
+
+// Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 
+// Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
-  
+
   const localPart = email.split('@')[0];
   const rawParts = localPart.split(/[._-]+/).filter(Boolean);
-  const capitalize = (str) => str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
-  
+
+  const capitalize = (str) =>
+    str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
+
   if (rawParts.length >= 2) {
     const prenom = capitalize(rawParts[0]);
     const nom = capitalize(rawParts[1]);
@@ -205,9 +211,12 @@ function extraireNomPrenomDepuisEmail(email) {
   }
 }
 
+// Helper : générer une référence unique
 function genererReference(nom, prenom) {
   const now = new Date();
+  
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
+  
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
   const annee = now.getFullYear();
@@ -218,8 +227,10 @@ function genererReference(nom, prenom) {
   return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
 
+// Helper : formatage date française (JJ/MM/AAAA)
 function formatDateFR(date) {
   if (!date) return '';
+  
   if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
     return date;
   }
@@ -234,6 +245,7 @@ function formatDateFR(date) {
   return `${jour}/${mois}/${annee}`;
 }
 
+// Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
@@ -241,6 +253,7 @@ function formatDateShort(date) {
   return d.toLocaleDateString('fr-FR');
 }
 
+// Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
   if (type_conge === 'annuel') return 'Congé annuel';
@@ -251,35 +264,13 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
   return type_conge;
 }
 
-function calculerJoursOuvres(dateDebut, dateFin) {
-  if (!dateDebut || !dateFin) return 0;
-  
-  const debut = new Date(dateDebut);
-  const fin = new Date(dateFin);
-  
-  debut.setHours(0, 0, 0, 0);
-  fin.setHours(0, 0, 0, 0);
-  
-  if (fin < debut) return 0;
-  
-  let joursOuvres = 0;
-  const dateActuelle = new Date(debut);
-  
-  while (dateActuelle <= fin) {
-    const jourSemaine = dateActuelle.getDay();
-    if (jourSemaine >= 1 && jourSemaine <= 5) {
-      joursOuvres++;
-    }
-    dateActuelle.setDate(dateActuelle.getDate() + 1);
-  }
-  
-  return joursOuvres;
-}
-
+// Fonction pour compresser les pièces jointes si nécessaire
 async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
   
   return attachments.map(attachment => {
+    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
+    // Pour l'instant, on se contente de vérifier la taille
     if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
       console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
     }
@@ -287,13 +278,26 @@ async function optimizeAttachments(attachments) {
   });
 }
 
-// ==================== GÉNÉRATION DE DOCUMENTS ====================
+// ==================== FONCTIONS DE GÉNÉRATION DE DOCUMENTS ====================
+
+// Fonction pour générer une attestation de travail Word
 async function genererAttestationTravailWord(employe) {
   try {
-    await fs.access(TEMPLATE_TRAVAIL_PATH);
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_TRAVAIL_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
+    
+    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
     
+    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -304,6 +308,7 @@ async function genererAttestationTravailWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
     
+    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -316,19 +321,30 @@ async function genererAttestationTravailWord(employe) {
     });
     
     console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
     
   } catch (error) {
-    console.error('Erreur génération attestation travail:', error);
+    console.error('Erreur lors de la génération Word attestation travail:', error);
     throw error;
   }
 }
 
+// Fonction pour générer une attestation de salaire Word
 async function genererAttestationSalaireWord(employe) {
   try {
-    await fs.access(TEMPLATE_SALAIRE_PATH);
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_SALAIRE_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_SALAIRE_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
     
+    // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
       return parseFloat(salaire).toLocaleString('fr-TN', {
@@ -337,8 +353,10 @@ async function genererAttestationSalaireWord(employe) {
       }).replace(/,/g, ' ');
     };
     
+    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
     
+    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -349,6 +367,7 @@ async function genererAttestationSalaireWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
     
+    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -361,72 +380,87 @@ async function genererAttestationSalaireWord(employe) {
     });
     
     console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
     
   } catch (error) {
-    console.error('Erreur génération attestation salaire:', error);
+    console.error('Erreur lors de la génération Word attestation salaire:', error);
     throw error;
   }
 }
 
 // ==================== ROUTES API ====================
+
+// Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, matricule, nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2, 
-              date_debut, date_naissance, cin, salaire_brute 
+      `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
+              mail_responsable1, mail_responsable2, date_debut,
+              date_naissance, cin, salaire_brute
        FROM employees 
        WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
     );
-    
     console.log(`✅ Récupération ${result.rows.length} employés actifs`);
     res.json(result.rows);
-    
   } catch (err) {
     console.error('❌ Erreur récupération employés:', err);
     res.status(500).json({ error: 'Erreur lors de la récupération des employés' });
   }
 });
 
+// Route pour générer une attestation Word et l'envoyer par email
 app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
-  
+
   try {
+    // Validation
     if (!employe_id || !type_document) {
-      return res.status(400).json({ error: 'Les champs employé et type de document sont obligatoires' });
+      return res.status(400).json({ 
+        error: 'Les champs employé et type de document sont obligatoires' 
+      });
     }
-    
+
     console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
-    
+
+    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
-      `SELECT nom, prenom, poste, adresse_mail, date_debut, date_naissance, cin, matricule, salaire_brute 
+      `SELECT nom, prenom, poste, adresse_mail, date_debut, 
+              date_naissance, cin, matricule, salaire_brute
        FROM employees WHERE id = $1`,
       [employe_id]
     );
-    
+
     if (employeResult.rows.length === 0) {
       return res.status(404).json({ error: 'Employé non trouvé' });
     }
-    
+
     const employe = employeResult.rows[0];
     let wordBuffer;
     let fileName;
     let documentTypeLabel;
-    
+
+    // Générer le document Word selon le type
     if (type_document === 'attestation_salaire') {
-      if (!employe.salaire_brute) {
-        return res.status(400).json({ error: 'Salaire non disponible pour cet employé' });
-      }
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de salaire';
+      
+      // Vérifier si le salaire existe
+      if (!employe.salaire_brute) {
+        return res.status(400).json({ 
+          error: 'Salaire non disponible pour cet employé' 
+        });
+      }
     } else {
+      // Par défaut, attestation de travail
       wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
-    
+
+    // Optimiser les pièces jointes
     const optimizedAttachments = await optimizeAttachments([
       {
         filename: fileName,
@@ -434,78 +468,82 @@ app.post('/api/generer-attestation', async (req, res) => {
         contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
       }
     ]);
-    
+
+    // Préparer l'email
     const mailOptions = {
       from: {
         name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+        address: 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
       subject: `Demande de ${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2c3e50;">Demande de ${documentTypeLabel.toLowerCase()}</h2>
-          
-          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+          <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+            Demande de ${documentTypeLabel.toLowerCase()}
+          </h2>
+          <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
             <p><strong>Matricule:</strong> ${employe.matricule || 'Non spécifié'}</p>
             <p><strong>Poste:</strong> ${employe.poste || 'Non spécifié'}</p>
             <p><strong>Date d'embauche:</strong> ${formatDateFR(employe.date_debut)}</p>
             <p><strong>Type de document:</strong> ${documentTypeLabel}</p>
-            ${type_document === 'attestation_salaire' ? `
-              <p><strong>Salaire brut annuel:</strong> ${employe.salaire_brute} TND</p>
-            ` : ''}
+            ${type_document === 'attestation_salaire' ? `<p><strong>Salaire brut annuel:</strong> ${employe.salaire_brute} TND</p>` : ''}
             <p><strong>Date de la demande:</strong> ${formatDateFR(new Date())}</p>
           </div>
-          
-          <p>${documentTypeLabel} est jointe à cet email en format Word (.docx).</p>
+          <p style="color: #6b7280; font-size: 14px;">
+            ${documentTypeLabel} est jointe à cet email en format Word (.docx).
+          </p>
         </div>
       `,
       attachments: optimizedAttachments
     };
-    
+
+    // Envoyer l'email avec retry
     const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
-    
-    res.json({
-      success: true,
+
+    res.json({ 
+      success: true, 
       message: `${documentTypeLabel} générée et envoyée par email avec succès`,
       fileName: fileName,
       emailResult: emailResult
     });
-    
+
   } catch (err) {
-    console.error('❌ Erreur génération attestation:', err);
-    res.status(500).json({
+    console.error('❌ Erreur lors de la génération d\'attestation:', err);
+    res.status(500).json({ 
       error: 'Erreur lors de la génération du document: ' + err.message,
       details: err.details || ''
     });
   }
 });
 
+// Route pour télécharger l'attestation directement
 app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
-  
+
   try {
     if (!employe_id) {
       return res.status(400).json({ error: 'ID employé requis' });
     }
-    
+
     console.log(`📥 Téléchargement attestation pour employé ${employe_id}, type: ${type_document}`);
-    
+
     const employeResult = await pool.query(
-      `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute 
+      `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
        FROM employees WHERE id = $1`,
       [employe_id]
     );
-    
+
     if (employeResult.rows.length === 0) {
       return res.status(404).json({ error: 'Employé non trouvé' });
     }
-    
+
     const employe = employeResult.rows[0];
     let wordBuffer;
     let fileName;
-    
+
+    // Générer le document selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
@@ -514,110 +552,134 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
     
+    // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', wordBuffer.length);
     
     console.log(`✅ Téléchargement ${fileName} (${wordBuffer.length} octets)`);
     res.send(wordBuffer);
-    
+
   } catch (error) {
     console.error('❌ Erreur téléchargement attestation:', error);
     res.status(500).json({ error: 'Erreur lors de la génération du document' });
   }
 });
 
+// Créer une nouvelle demande RH (congé/autorisation/mission)
 app.post('/api/demandes', async (req, res) => {
   const {
-    employe_id, type_demande, titre, date_depart, date_retour,
-    heure_depart, heure_retour, demi_journee, type_conge,
-    frais_deplacement, type_conge_autre
+    employe_id,
+    type_demande,
+    titre,
+    date_depart,
+    date_retour,
+    heure_depart,
+    heure_retour,
+    demi_journee,
+    type_conge,
+    frais_deplacement,
+    type_conge_autre
   } = req.body;
-  
+
   try {
+    // Validation des champs obligatoires
     if (!employe_id || !type_demande || !titre || !date_depart) {
-      return res.status(400).json({
-        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires'
+      return res.status(400).json({ 
+        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
       });
     }
-    
+
     console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
-    
+
+    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
-      `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2 
+      `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
       [employe_id]
     );
-    
+
     if (employeResult.rows.length === 0) {
       return res.status(404).json({ error: 'Employé non trouvé' });
     }
-    
+
     const employe = employeResult.rows[0];
-    
+
+    // Convertir les chaînes vides en null pour les champs optionnels
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
     const fraisDeplacementFinal = frais_deplacement && frais_deplacement !== '' ? parseFloat(frais_deplacement) : null;
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
-    
+
+    // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
-       (employe_id, type_demande, titre, date_depart, date_retour, heure_depart, heure_retour, 
-        demi_journee, type_conge, type_conge_autre, frais_deplacement, statut) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
+       (employe_id, type_demande, titre, date_depart, date_retour, 
+        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
-        employe_id, type_demande, titre, date_depart, dateRetourFinal,
-        heureDepartFinal, heureRetourFinal, demi_journee || false,
-        typeCongeFinal, typeCongeAutreFinal, fraisDeplacementFinal, 'en_attente'
+        employe_id, 
+        type_demande, 
+        titre, 
+        date_depart, 
+        dateRetourFinal,
+        heureDepartFinal, 
+        heureRetourFinal, 
+        demi_journee || false, 
+        typeCongeFinal,
+        typeCongeAutreFinal,
+        fraisDeplacementFinal,
+        'en_attente'
       ]
     );
-    
+
     const demandeId = insertResult.rows[0].id;
     console.log(`✅ Demande créée avec ID: ${demandeId}`);
-    
+
+    // Envoyer email au responsable 1
     if (employe.mail_responsable1) {
       await envoyerEmailResponsable(
         employe,
         employe.mail_responsable1,
         demandeId,
         1,
-        {
-          type_demande,
-          titre,
-          date_depart,
-          date_retour: dateRetourFinal,
-          heure_depart: heureDepartFinal,
-          heure_retour: heureRetourFinal,
-          demi_journee,
+        { 
+          type_demande, 
+          titre, 
+          date_depart, 
+          date_retour: dateRetourFinal, 
+          heure_depart: heureDepartFinal, 
+          heure_retour: heureRetourFinal, 
+          demi_journee, 
           type_conge: typeCongeFinal,
           type_conge_autre: typeCongeAutreFinal,
-          frais_deplacement: fraisDeplacementFinal
+          frais_deplacement: fraisDeplacementFinal 
         }
       );
     } else {
       console.warn(`⚠️ Aucun responsable 1 défini pour ${employe.nom} ${employe.prenom}`);
     }
-    
-    res.json({
-      success: true,
+
+    res.json({ 
+      success: true, 
       message: 'Demande créée avec succès',
-      demandeId
+      demandeId 
     });
-    
   } catch (err) {
     console.error('❌ Erreur création demande:', err);
     res.status(500).json({ error: 'Erreur lors de la création de la demande: ' + err.message });
   }
 });
 
+// Fonction pour envoyer email au responsable (MODIFIÉE)
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
   
-  let typeLabel = details.type_demande === 'conges' ? 'Congé' :
+  let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
                   details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
   
   let detailsHtml = `
@@ -625,7 +687,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     <p><strong>Motif:</strong> ${details.titre}</p>
     <p><strong>Date de départ:</strong> ${formatDateShort(details.date_depart)}</p>
   `;
-  
+
   if (details.type_demande === 'conges') {
     const typeCongeLabel = getTypeCongeLabel(details.type_conge, details.type_conge_autre);
     detailsHtml += `
@@ -646,443 +708,447 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       <p><strong>Frais de déplacement:</strong> ${details.frais_deplacement || 0} TND</p>
     `;
   }
-  
+
+  // Si c'est pour le deuxième responsable après approbation du premier
   let infoPremierApprobation = '';
   if (premierResponsable && niveau === 2) {
     infoPremierApprobation = `
-      <div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
-        ✓ Cette demande a déjà été approuvée par ${premierResponsable}
+      <div style="background: #d1fae5; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #10b981;">
+        <p style="margin: 0; color: #065f46;">
+          <strong>✓ Cette demande a déjà été approuvée par ${premierResponsable}</strong>
+        </p>
       </div>
     `;
   }
-  
+
   const mailOptions = {
     from: {
       name: 'Administration STS',
-      address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+      address: 'administration.STS@avocarbon.com'
     },
     to: emailResponsable,
     subject: `${niveau === 2 && premierResponsable ? '✓ ' : ''}Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #2c3e50;">
-          ${niveau === 2 && premierResponsable ? 'Demande approuvée par le premier responsable - ' : ''}
-          Demande RH en attente d'approbation
+        <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+          ${niveau === 2 && premierResponsable ? 'Demande approuvée par le premier responsable - ' : ''}Demande RH en attente d'approbation
         </h2>
         ${infoPremierApprobation}
-        
-        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
           <p><strong>Poste:</strong> ${employe.poste}</p>
+        </div>
+        <div style="margin: 20px 0;">
           ${detailsHtml}
         </div>
-        
         <div style="text-align: center; margin: 30px 0;">
           <a href="${lienApprobation}" 
-             style="background-color: #007bff; color: white; padding: 12px 30px; 
-                    text-decoration: none; border-radius: 5px; display: inline-block;">
+             style="display: inline-block; padding: 12px 30px; background-color: #2563eb; color: white; 
+                    text-decoration: none; border-radius: 6px; font-weight: bold;">
             ${niveau === 2 && premierResponsable ? 'Donner votre approbation finale' : 'Voir et traiter la demande'}
           </a>
         </div>
-        
-        <p style="color: #6c757d; font-size: 12px;">
+        <p style="color: #6b7280; font-size: 14px; text-align: center;">
           Ce lien expirera après traitement de la demande.
         </p>
       </div>
     `
   };
-  
+
   try {
     await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
     console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
+    // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
   }
 }
 
+// Page d'approbation/refus de demande
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
+  
   console.log(`🔗 Accès page approbation demande ${id}, niveau ${niveau}`);
   
   try {
     const result = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, e.mail_responsable1, e.mail_responsable2 
-       FROM demande_rh d 
-       JOIN employees e ON d.employe_id = e.id 
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
+              e.mail_responsable1, e.mail_responsable2
+       FROM demande_rh d
+       JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).send(`
-        <!DOCTYPE html>
         <html>
-        <head>
-          <meta charset="UTF-8">
-          <title>Demande non trouvée</title>
-          <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }</style>
-        </head>
-        <body>
-          <h1>Demande non trouvée</h1>
-          <p>La demande que vous cherchez n'existe pas ou a déjà été traitée.</p>
-        </body>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1 style="color: #ef4444;">Demande non trouvée</h1>
+            <p>La demande que vous cherchez n'existe pas ou a déjà été traitée.</p>
+          </body>
         </html>
       `);
     }
-    
+
     const demande = result.rows[0];
     
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.send(`
-        <!DOCTYPE html>
         <html>
-        <head>
-          <meta charset="UTF-8">
-          <title>Demande déjà traitée</title>
-          <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }</style>
-        </head>
-        <body>
-          <h1>Demande déjà traitée</h1>
-          <p>Cette demande a déjà été ${demande.statut === 'approuve' ? 'approuvée' : 'refusée'}.</p>
-        </body>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1 style="color: #6b7280;">Demande déjà traitée</h1>
+            <p>Cette demande a déjà été ${demande.statut === 'approuve' ? 'approuvée' : 'refusée'}.</p>
+          </body>
         </html>
       `);
     }
-    
-    const typeDemandeLabel = demande.type_demande === 'conges' ? 'Congé' :
-                            demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
-    const typeCongeLabel = demande.type_demande === 'conges' ? 
-                          getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
-    
+
+    const typeDemandeLabel = demande.type_demande === 'conges'
+      ? 'Congé'
+      : demande.type_demande === 'autorisation'
+        ? 'Autorisation'
+        : 'Mission';
+
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
+
+    // Noms des responsables
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
     
+    // Échapper les apostrophes dans les chaînes JavaScript
     const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
     const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
     
     res.send(`
       <!DOCTYPE html>
-      <html>
+      <html lang="fr">
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Approbation Demande RH</title>
         <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            max-width: 800px; 
+            margin: 50px auto; 
+            padding: 20px; 
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+          }
+          .card { 
+            background: white; 
+            border-radius: 16px; 
+            padding: 30px; 
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+          }
+          .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e5e7eb;
+          }
+          .header h1 {
+            color: #1f2937;
+            margin: 0;
+            font-size: 2rem;
+          }
+          .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+            background: #f8fafc;
             padding: 20px;
+            border-radius: 12px;
           }
-          .container {
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            max-width: 600px;
-            width: 100%;
-            padding: 30px;
+          .info-item {
+            margin: 8px 0;
           }
-          h1 {
-            color: #2c3e50;
-            margin-bottom: 10px;
-            font-size: 24px;
-          }
-          .badge {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-            margin-bottom: 20px;
-          }
-          .badge-warning { background-color: #fff3cd; color: #856404; }
-          .badge-success { background-color: #d4edda; color: #155724; }
-          .info-section {
-            background-color: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-          }
-          .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 10px 0;
-            border-bottom: 1px solid #dee2e6;
-          }
-          .info-row:last-child { border-bottom: none; }
           .info-label {
             font-weight: 600;
-            color: #495057;
+            color: #374151;
           }
           .info-value {
-            color: #212529;
+            color: #6b7280;
           }
-          .button-group {
-            display: flex;
-            gap: 15px;
-            margin-top: 30px;
+          .buttons { 
+            text-align: center;
+            margin-top: 40px; 
           }
-          .btn {
-            flex: 1;
-            padding: 12px 20px;
-            border: none;
-            border-radius: 5px;
-            font-size: 16px;
+          button { 
+            padding: 14px 40px; 
+            margin: 10px; 
+            border: none; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            font-size: 16px; 
             font-weight: 600;
-            cursor: pointer;
             transition: all 0.3s ease;
           }
-          .btn-success {
-            background-color: #28a745;
-            color: white;
+          .approve { 
+            background-color: #10b981; 
+            color: white; 
           }
-          .btn-success:hover {
-            background-color: #218838;
+          .approve:hover {
+            background-color: #059669;
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(40,167,69,0.3);
           }
-          .btn-danger {
-            background-color: #dc3545;
-            color: white;
+          .reject { 
+            background-color: #ef4444; 
+            color: white; 
           }
-          .btn-danger:hover {
-            background-color: #c82333;
+          .reject:hover {
+            background-color: #dc2626;
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(220,53,69,0.3);
           }
-          .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0,0,0,0.5);
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-          }
-          .modal-content {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            max-width: 400px;
-            width: 90%;
-          }
-          .modal-content h3 {
-            margin-bottom: 15px;
-            color: #2c3e50;
-          }
-          .modal-content textarea {
-            width: 100%;
-            min-height: 100px;
-            padding: 10px;
-            border: 1px solid #ced4da;
-            border-radius: 5px;
+          textarea { 
+            width: 100%; 
+            padding: 12px; 
+            margin-top: 10px; 
+            display: none; 
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
             font-family: inherit;
-            font-size: 14px;
-            margin-bottom: 15px;
-            resize: vertical;
           }
-          .modal-buttons {
-            display: flex;
-            gap: 10px;
-          }
-          .btn-secondary {
-            background-color: #6c757d;
-            color: white;
-          }
-          .btn-secondary:hover {
-            background-color: #5a6268;
-          }
-          .alert {
-            padding: 15px;
-            border-radius: 5px;
+          .refus-section {
             margin-top: 20px;
-            display: none;
           }
-          .alert-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-          .alert-danger { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-          .spinner {
+          .status-badge {
             display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(255,255,255,.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 1s ease-in-out infinite;
+            padding: 4px 12px;
+            background: #fef3c7;
+            color: #92400e;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
           }
-          @keyframes spin {
-            to { transform: rotate(360deg); }
+          .approval-notice {
+            background: #d1fae5;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #10b981;
+          }
+          .approval-notice p {
+            margin: 0;
+            color: #065f46;
+            font-weight: 600;
           }
         </style>
       </head>
       <body>
-        <div class="container">
-          <h1>📋 Demande RH - Approbation</h1>
-          <span class="badge badge-warning">En attente de validation</span>
+        <div class="card">
+          <div class="header">
+            <h1>📋 Demande RH - Approbation</h1>
+            <div class="status-badge">En attente de validation</div>
+          </div>
           
           ${niveau == 2 && demande.mail_responsable1 ? `
-            <div style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
-              ✓ Cette demande a été approuvée par ${resp1 ? resp1.fullName : 'le premier responsable'}
-            </div>
+          <div class="approval-notice">
+            <p>✓ Cette demande a été approuvée par ${resp1 ? resp1.fullName : 'le premier responsable'}</p>
+          </div>
           ` : ''}
           
-          <div class="info-section">
-            <div class="info-row">
-              <span class="info-label">Employé:</span>
-              <span class="info-value">${demande.nom} ${demande.prenom}</span>
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">Employé:</div>
+              <div class="info-value">${demande.nom} ${demande.prenom}</div>
             </div>
-            <div class="info-row">
-              <span class="info-label">Poste:</span>
-              <span class="info-value">${demande.poste}</span>
+            <div class="info-item">
+              <div class="info-label">Poste:</div>
+              <div class="info-value">${demande.poste}</div>
             </div>
-            <div class="info-row">
-              <span class="info-label">Type de demande:</span>
-              <span class="info-value">${typeDemandeLabel}</span>
+            <div class="info-item">
+              <div class="info-label">Type de demande:</div>
+              <div class="info-value">${typeDemandeLabel}</div>
             </div>
-            <div class="info-row">
-              <span class="info-label">Motif:</span>
-              <span class="info-value">${demande.titre}</span>
+            <div class="info-item">
+              <div class="info-label">Motif:</div>
+              <div class="info-value">${demande.titre}</div>
             </div>
-            <div class="info-row">
-              <span class="info-label">Date de départ:</span>
-              <span class="info-value">${formatDateShort(demande.date_depart)}</span>
+            <div class="info-item">
+              <div class="info-label">Date de départ:</div>
+              <div class="info-value">${formatDateShort(demande.date_depart)}</div>
             </div>
             ${demande.date_retour ? `
-              <div class="info-row">
-                <span class="info-label">Date de retour:</span>
-                <span class="info-value">${formatDateShort(demande.date_retour)}</span>
-              </div>
+            <div class="info-item">
+              <div class="info-label">Date de retour:</div>
+              <div class="info-value">${formatDateShort(demande.date_retour)}</div>
+            </div>
             ` : ''}
             ${demande.heure_depart ? `
-              <div class="info-row">
-                <span class="info-label">Heure de départ:</span>
-                <span class="info-value">${demande.heure_depart}</span>
-              </div>
+            <div class="info-item">
+              <div class="info-label">Heure de départ:</div>
+              <div class="info-value">${demande.heure_depart}</div>
+            </div>
             ` : ''}
             ${demande.heure_retour ? `
-              <div class="info-row">
-                <span class="info-label">Heure de retour:</span>
-                <span class="info-value">${demande.heure_retour}</span>
-              </div>
+            <div class="info-item">
+              <div class="info-label">Heure de retour:</div>
+              <div class="info-value">${demande.heure_retour}</div>
+            </div>
             ` : ''}
             ${demande.frais_deplacement ? `
-              <div class="info-row">
-                <span class="info-label">Frais de déplacement:</span>
-                <span class="info-value">${demande.frais_deplacement} TND</span>
-              </div>
+            <div class="info-item">
+              <div class="info-label">Frais de déplacement:</div>
+              <div class="info-value">${demande.frais_deplacement} TND</div>
+            </div>
             ` : ''}
             ${demande.type_demande === 'conges' ? `
-              <div class="info-row">
-                <span class="info-label">Type de congé:</span>
-                <span class="info-value">${typeCongeLabel}</span>
-              </div>
+            <div class="info-item">
+              <div class="info-label">Type de congé:</div>
+              <div class="info-value">${typeCongeLabel}</div>
+            </div>
             ` : ''}
           </div>
           
-          <div class="button-group">
-            <button onclick="approuver()" class="btn btn-success">✅ Approuver</button>
-            <button onclick="ouvrirModalRefus()" class="btn btn-danger">❌ Refuser</button>
+          <div class="buttons">
+            <button class="approve" id="approveBtn">✅ Approuver</button>
+            <button class="reject" id="rejectBtn">❌ Refuser</button>
           </div>
           
-          <div id="message" class="alert"></div>
-        </div>
-        
-        <div id="modalRefus" class="modal">
-          <div class="modal-content">
-            <h3>Confirmer le refus</h3>
-            <textarea id="commentaireRefus" placeholder="Motif du refus (optionnel)"></textarea>
-            <div class="modal-buttons">
-              <button onclick="fermerModalRefus()" class="btn btn-secondary">Annuler</button>
-              <button onclick="confirmerRefus()" class="btn btn-danger">Confirmer le refus</button>
-            </div>
+          <div class="refus-section">
+            <textarea id="commentaire" rows="4" placeholder="Veuillez indiquer le motif du refus..."></textarea>
+            <button class="reject" id="confirmRefus" style="display:none; margin-top:10px;">Confirmer le refus</button>
           </div>
         </div>
-        
+
         <script>
-          function ouvrirModalRefus() {
-            document.getElementById('modalRefus').style.display = 'flex';
-          }
+          // Déclaration des variables globales
+          const demandeId = ${id};
+          const niveau = ${Number(niveau) || 1};
           
-          function fermerModalRefus() {
-            document.getElementById('modalRefus').style.display = 'none';
-          }
-          
-          async function approuver() {
-            const btn = event.target;
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner"></span> Approbation...';
-            
-            try {
-              const response = await fetch('/api/demandes/${id}/approuver', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ niveau: ${niveau} })
-              });
-              
-              const data = await response.json();
-              
-              if (data.success) {
-                showMessage('success', '✅ Demande approuvée avec succès!');
-                setTimeout(() => {
-                  window.location.reload();
-                }, 2000);
-              } else {
-                showMessage('danger', '❌ ' + (data.error || 'Erreur lors de l\\'approbation'));
-                btn.disabled = false;
-                btn.innerHTML = '✅ Approuver';
-              }
-            } catch (error) {
-              showMessage('danger', '❌ Erreur de connexion au serveur');
-              btn.disabled = false;
-              btn.innerHTML = '✅ Approuver';
+          function setProcessing(isProcessing) {
+            const approveBtn = document.getElementById('approveBtn');
+            const rejectBtn = document.getElementById('rejectBtn');
+            const confirmRefus = document.getElementById('confirmRefus');
+
+            [approveBtn, rejectBtn, confirmRefus].forEach(btn => {
+              if (btn) btn.disabled = isProcessing;
+            });
+
+            if (approveBtn) {
+              approveBtn.textContent = isProcessing ? 'Traitement...' : '✅ Approuver';
+            }
+            if (confirmRefus) {
+              confirmRefus.textContent = isProcessing ? 'Traitement...' : 'Confirmer le refus';
             }
           }
-          
-          async function confirmerRefus() {
-            const commentaire = document.getElementById('commentaireRefus').value.trim();
-            
-            if (!commentaire) {
-              alert('Veuillez indiquer un motif de refus');
+
+          function showResult(status, message) {
+            const badge = document.querySelector('.status-badge');
+            if (badge) {
+              if (status === 'approuve') {
+                badge.textContent = 'Demande approuvée';
+                badge.style.background = '#d1fae5';
+                badge.style.color = '#065f46';
+              } else if (status === 'refuse') {
+                badge.textContent = 'Demande refusée';
+                badge.style.background = '#fee2e2';
+                badge.style.color = '#991b1b';
+              }
+            }
+
+            const buttons = document.querySelector('.buttons');
+            if (buttons) buttons.style.display = 'none';
+
+            const refusSection = document.querySelector('.refus-section');
+            if (refusSection) refusSection.style.display = 'none';
+
+            const card = document.querySelector('.card');
+            if (card && message) {
+              const info = document.createElement('p');
+              info.style.marginTop = '20px';
+              info.style.textAlign = 'center';
+              info.style.color = '#374151';
+              info.textContent = message;
+              card.appendChild(info);
+            }
+          }
+
+          function toggleRefus() {
+            const commentaire = document.getElementById('commentaire');
+            const confirmRefus = document.getElementById('confirmRefus');
+            if (commentaire) commentaire.style.display = 'block';
+            if (confirmRefus) confirmRefus.style.display = 'inline-block';
+          }
+
+          async function approuver() {
+            setProcessing(true);
+            try {
+              const response = await fetch('/api/demandes/' + demandeId + '/approuver', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ niveau: niveau })
+              });
+              
+              if (response.ok) {
+                const data = await response.json().catch(() => ({}));
+                showResult('approuve', data.message || 'Votre décision a été enregistrée.');
+              } else {
+                alert('❌ Erreur lors de l\\'approbation');
+                setProcessing(false);
+              }
+            } catch (e) {
+              console.error(e);
+              alert('❌ Erreur réseau');
+              setProcessing(false);
+            }
+          }
+
+          async function refuser() {
+            const commentaireInput = document.getElementById('commentaire');
+            const commentaire = commentaireInput ? commentaireInput.value : '';
+            if (!commentaire.trim()) {
+              alert('Veuillez indiquer le motif du refus');
               return;
             }
-            
-            fermerModalRefus();
-            
+
+            setProcessing(true);
             try {
-              const response = await fetch('/api/demandes/${id}/refuser', {
+              const response = await fetch('/api/demandes/' + demandeId + '/refuser', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ niveau: ${niveau}, commentaire: commentaire })
+                body: JSON.stringify({ niveau: niveau, commentaire: commentaire })
               });
               
-              const data = await response.json();
-              
-              if (data.success) {
-                showMessage('success', '✅ Demande refusée avec succès');
-                setTimeout(() => {
-                  window.location.reload();
-                }, 2000);
+              if (response.ok) {
+                const data = await response.json().catch(() => ({}));
+                showResult('refuse', data.message || 'Votre décision a été enregistrée.');
               } else {
-                showMessage('danger', '❌ ' + (data.error || 'Erreur lors du refus'));
+                alert('❌ Erreur lors du refus');
+                setProcessing(false);
               }
-            } catch (error) {
-              showMessage('danger', '❌ Erreur de connexion au serveur');
+            } catch (e) {
+              console.error(e);
+              alert('❌ Erreur réseau');
+              setProcessing(false);
             }
           }
-          
-          function showMessage(type, message) {
-            const messageDiv = document.getElementById('message');
-            messageDiv.className = 'alert alert-' + type;
-            messageDiv.textContent = message;
-            messageDiv.style.display = 'block';
-          }
+
+          // Initialisation des événements
+          document.addEventListener('DOMContentLoaded', function() {
+            const approveBtn = document.getElementById('approveBtn');
+            const rejectBtn = document.getElementById('rejectBtn');
+            const confirmRefus = document.getElementById('confirmRefus');
+            
+            if (approveBtn) {
+              approveBtn.addEventListener('click', approuver);
+            }
+            
+            if (rejectBtn) {
+              rejectBtn.addEventListener('click', toggleRefus);
+            }
+            
+            if (confirmRefus) {
+              confirmRefus.addEventListener('click', refuser);
+            }
+          });
         </script>
       </body>
       </html>
@@ -1090,81 +1156,82 @@ app.get('/approuver-demande', async (req, res) => {
   } catch (err) {
     console.error('❌ Erreur page approbation:', err);
     res.status(500).send(`
-      <!DOCTYPE html>
       <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>Erreur</title>
-        <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }</style>
-      </head>
-      <body>
-        <h1>Erreur serveur</h1>
-        <p>Une erreur est survenue lors du traitement de votre demande.</p>
-      </body>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #ef4444;">Erreur serveur</h1>
+          <p>Une erreur est survenue lors du traitement de votre demande.</p>
+        </body>
       </html>
     `);
   }
 });
 
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
+
   console.log(`✅ Approbation demande ${id}, niveau ${niveau}`);
-  
+
   try {
     const demandeResult = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, 
-               e.poste, e.matricule 
-       FROM demande_rh d 
-       JOIN employees e ON d.employe_id = e.id 
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
+       FROM demande_rh d
+       JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
-    
+
     if (demandeResult.rows.length === 0) {
       return res.status(404).json({ error: 'Demande non trouvée' });
     }
-    
+
     const demande = demandeResult.rows[0];
-    
+
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
-    
+
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    
+
+    // Mettre à jour l'approbation (R1 ou R2) à TRUE
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
-    
+
+    // Noms des responsables à partir de leurs emails
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
-    
+
+    // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
+      // Email à l'employé : approuvé par R1, en attente de R2
       await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
-          address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+          address: 'administration.STS@avocarbon.com'
         },
         to: demande.adresse_mail,
         subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #28a745;">✅ Étape 1 : Demande approuvée</h2>
-            <p>Bonjour ${demande.nom} ${demande.prenom},</p>
-            <p>Votre demande de ${demande.type_demande} a été approuvée par ${resp1 ? resp1.fullName : 'votre responsable hiérarchique'}.</p>
-            <p>Elle est maintenant en attente d'approbation par ${resp2 ? resp2.fullName : 'le deuxième responsable'}.</p>
-            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
+            <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+              <p>Votre demande de <strong>${demande.type_demande}</strong> a été <strong>approuvée par ${resp1 ? resp1.fullName : 'votre responsable hiérarchique'}</strong>.</p>
+              <p>Elle est maintenant <strong>en attente d'approbation par ${resp2 ? resp2.fullName : 'le deuxième responsable'}</strong>.</p>
               <p><strong>Date de départ :</strong> ${formatDateShort(demande.date_depart)}</p>
               <p><strong>Motif :</strong> ${demande.titre}</p>
             </div>
-            <p>Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
+            <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
           </div>
         `
       }, 'Approbation niveau 1');
-      
+
+      // Email au responsable 2 avec mention du premier approbateur
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1182,119 +1249,60 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           type_conge_autre: demande.type_conge_autre,
           frais_deplacement: demande.frais_deplacement
         },
-        resp1 ? resp1.fullName : 'le premier responsable'
+        resp1 ? resp1.fullName : 'le premier responsable'  // ← NOUVEAU PARAMÈTRE
       );
       
-      return res.json({
-        success: true,
-        message: 'Demande approuvée par le premier responsable, en attente du second'
+      return res.json({ 
+        success: true, 
+        message: 'Demande approuvée par le premier responsable, en attente du second' 
       });
-    }
-    
-    await pool.query(`UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`, [id]);
-    
+    } 
+
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
+    await pool.query(
+      `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
+      [id]
+    );
+
+    // Qui est l'approbateur final ?
     let approuveur = null;
     if (niveau == 1 && !demande.mail_responsable2) {
-      approuveur = resp1;
+      approuveur = resp1; // seul responsable
     } else if (niveau == 2) {
-      approuveur = resp2;
+      approuveur = resp2; // deuxième approbation
     }
-    
-    const typeCongeLabel = demande.type_demande === 'conges' ? 
-                          getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
-    
+
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
+
+    // Email final à l'employé
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+        address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
-      subject: '✅ Votre demande RH a été approuvée',
+      subject: 'Votre demande RH a été définitivement approuvée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #28a745;">✅ Demande RH approuvée</h2>
-          <p>Bonjour ${demande.nom} ${demande.prenom},</p>
-          <p>Nous avons le plaisir de vous informer que votre demande a été approuvée.</p>
-          
-          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="color: #2c3e50; margin-top: 0;">📋 Détails de la demande</h3>
-            <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
+          <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
+          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${formatDateShort(demande.date_depart)}</strong> a été <strong>approuvée</strong>.</p>
+            ${approuveur ? `<p>La demande a été validée par <strong>${approuveur.fullName}</strong>.</p>` : ''}
             <p><strong>Motif:</strong> ${demande.titre}</p>
-            <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-            ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
-            ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
-            ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
-            ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
-            ${approuveur ? `<p><strong>Approuvé par:</strong> ${approuveur.fullName}</p>` : ''}
           </div>
-          
-          <p style="color: #6c757d; font-size: 14px;">Si vous avez des questions, n'hésitez pas à contacter le service RH.</p>
         </div>
       `
-    }, 'Approbation finale - Email employé');
+    }, 'Approbation finale demande');
+
+    console.log(`✅ Demande ${id} complètement approuvée`);
     
-    let joursOuvres = 0;
-    let infoJoursCongee = '';
-    if (demande.type_demande === 'conges' && demande.date_retour) {
-      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-      infoJoursCongee = `
-        <div class="info-row">
-          <span class="info-label">Nombre de jours ouvrés:</span>
-          <span class="info-value">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</span>
-        </div>
-      `;
-    }
-    
-    await sendEmailWithRetry({
-      from: {
-        name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
-      },
-      to: 'fethi.chaouachi@avocarbon.com',
-      subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; background-color: #f8f9fa; padding: 30px; border-radius: 10px;">
-          <h2 style="color: #2c3e50; border-bottom: 3px solid #007bff; padding-bottom: 10px;">📋 Nouvelle demande RH approuvée</h2>
-          
-          <div style="background-color: #d1ecf1; color: #0c5460; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.
-          </div>
-          
-          <div style="background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="color: #495057; margin-top: 0;">👤 Informations Employé</h3>
-            <p><strong>Nom complet:</strong> ${demande.nom} ${demande.prenom}</p>
-            <p><strong>Matricule:</strong> ${demande.matricule || 'Non spécifié'}</p>
-            <p><strong>Poste:</strong> ${demande.poste || 'Non spécifié'}</p>
-            <p><strong>Email:</strong> ${demande.adresse_mail}</p>
-          </div>
-          
-          <div style="background-color: white; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="color: #495057; margin-top: 0;">📋 Détails de la Demande</h3>
-            <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-            <p><strong>Motif:</strong> ${demande.titre}</p>
-            <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-            ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
-            ${joursOuvres > 0 ? `<p><strong>Nombre de jours ouvrés:</strong> ${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</p>` : ''}
-            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
-            ${demande.demi_journee ? `<p><strong>Demi-journée:</strong> Oui</p>` : ''}
-            ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
-            ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
-            ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
-          </div>
-          
-          <p style="color: #6c757d; font-size: 12px; text-align: center; margin-top: 30px;">
-            Cet email est envoyé automatiquement par le système de gestion RH
-          </p>
-        </div>
-      `
-    }, 'Notification RH - Demande approuvée');
-    
-    console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés`);
-    
-    res.json({
-      success: true,
-      message: 'Demande complètement approuvée et notifications envoyées'
+    res.json({ 
+      success: true, 
+      message: 'Demande complètement approuvée' 
     });
   } catch (err) {
     console.error('❌ Erreur approbation demande:', err);
@@ -1302,86 +1310,103 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   }
 });
 
+// Refuser une demande
 app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { id } = req.params;
   const { niveau, commentaire } = req.body;
+
   console.log(`❌ Refus demande ${id}, niveau ${niveau}`);
-  
+
   try {
     const demandeResult = await pool.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2 
-       FROM demande_rh d 
-       JOIN employees e ON d.employe_id = e.id 
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
+       FROM demande_rh d
+       JOIN employees e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
-    
+
     if (demandeResult.rows.length === 0) {
       return res.status(404).json({ error: 'Demande non trouvée' });
     }
-    
+
     const demande = demandeResult.rows[0];
-    
+
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
     }
-    
+
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
+    // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
-       SET statut = 'refuse', commentaire_refus = $1, ${colonneRefus} = false, updated_at = CURRENT_TIMESTAMP 
+       SET statut = 'refuse', 
+           commentaire_refus = $1, 
+           ${colonneRefus} = false,
+           updated_at = CURRENT_TIMESTAMP 
        WHERE id = $2`,
       [commentaire, id]
     );
-    
+
+    // Identité du responsable qui refuse
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
-    
+
     let refuserParTexte = 'votre responsable hiérarchique';
     if (niveau == 1 && resp1) {
       refuserParTexte = resp1.fullName;
     } else if (niveau == 2 && resp2) {
       refuserParTexte = resp2.fullName;
     }
-    
-    const typeCongeLabel = demande.type_demande === 'conges' ? 
-                          getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
-    
+
+    const typeCongeLabel = demande.type_demande === 'conges'
+      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
+      : null;
+
+    // Email à l'employé
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+        address: 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
       subject: 'Votre demande RH a été refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #dc3545;">❌ Votre demande RH a été refusée</h2>
-          <p>Bonjour ${demande.nom} ${demande.prenom},</p>
-          <p>Votre demande de ${demande.type_demande} pour le ${formatDateShort(demande.date_depart)} a été refusée.</p>
-          ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
-          <p>La décision a été prise par ${refuserParTexte}.</p>
-          <div style="background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <strong>Motif du refus:</strong> ${commentaire}
+          <h2 style="color: #ef4444;">❌ Votre demande RH a été refusée</h2>
+          <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+            <p>Votre demande de <strong>${demande.type_demande}</strong> pour le <strong>${formatDateShort(demande.date_depart)}</strong> a été refusée.</p>
+            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
+            <p>La décision a été prise par <strong>${refuserParTexte}</strong>.</p>
+            <p><strong>Motif du refus:</strong> ${commentaire}</p>
           </div>
         </div>
       `
     }, 'Refus demande');
-    
+
     console.log(`✅ Demande ${id} refusée`);
-    res.json({ success: true, message: 'Demande refusée avec succès' });
+    
+    res.json({ 
+      success: true, 
+      message: 'Demande refusée avec succès' 
+    });
   } catch (err) {
     console.error('❌ Erreur refus demande:', err);
     res.status(500).json({ error: 'Erreur lors du refus' });
   }
 });
 
+// Récupérer les demandes d'un employé
 app.get('/api/demandes/employe/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM demande_rh WHERE employe_id = $1 ORDER BY created_at DESC`,
+      `SELECT * FROM demande_rh 
+       WHERE employe_id = $1 
+       ORDER BY created_at DESC`,
       [req.params.id]
     );
     console.log(`✅ Récupération ${result.rows.length} demandes pour employé ${req.params.id}`);
@@ -1393,9 +1418,11 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
 });
 
 // ==================== ROUTES DE DIAGNOSTIC ====================
+
+// Route de santé
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
     smtpPoolSize: emailPool.transporters.length,
@@ -1403,45 +1430,48 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Route pour tester la configuration SMTP
 app.get('/api/test-email', async (req, res) => {
   try {
     const testMailOptions = {
       from: {
         name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+        address: 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
       subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
       text: 'Ceci est un email de test pour vérifier la configuration SMTP.',
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2>Test SMTP Configuration</h2>
+          <h2 style="color: #2563eb;">Test SMTP Configuration</h2>
           <p>Ceci est un email de test envoyé depuis le serveur RH.</p>
-          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
-          <p><strong>Server:</strong> ${process.env.NODE_ENV || 'development'}</p>
+          <p>Timestamp: ${new Date().toISOString()}</p>
+          <p>Server: ${process.env.NODE_ENV || 'development'}</p>
         </div>
       `
     };
-    
+
     const result = await sendEmailWithRetry(testMailOptions, 'Test SMTP');
     
-    res.json({
-      success: true,
+    res.json({ 
+      success: true, 
       message: 'Email de test envoyé avec succès',
       result: result
     });
   } catch (error) {
     console.error('❌ Erreur test email:', error);
-    res.status(500).json({
-      success: false,
+    res.status(500).json({ 
+      success: false, 
       error: error.message,
       details: error.originalError ? error.originalError.message : ''
     });
   }
 });
 
+// Route pour vérifier l'état des transporteurs SMTP
 app.get('/api/smtp-status', async (req, res) => {
   const statuses = [];
+  
   for (let i = 0; i < emailPool.transporters.length; i++) {
     const transporter = emailPool.transporters[i];
     try {
@@ -1460,6 +1490,7 @@ app.get('/api/smtp-status', async (req, res) => {
       });
     }
   }
+  
   res.json({
     poolSize: emailPool.transporters.length,
     currentIndex: emailPool.currentIndex,
@@ -1469,10 +1500,13 @@ app.get('/api/smtp-status', async (req, res) => {
 });
 
 // ==================== DÉMARRAGE DU SERVEUR ====================
+
 const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, async () => {
   console.log(`
   🚀 Serveur démarré sur le port ${PORT}
+  =========================================
   📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande
   👥 API Employés: http://localhost:${PORT}/api/employees/actifs
   📋 API Demandes: http://localhost:${PORT}/api/demandes
@@ -1482,8 +1516,10 @@ app.listen(PORT, async () => {
   📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
   `);
   
+  // Vérifier la connexion SMTP au démarrage
   await verifySMTPConnection();
   
+  // Vérifier les templates Word
   try {
     await fs.access(TEMPLATE_TRAVAIL_PATH);
     console.log('✅ Template attestation travail trouvé');
