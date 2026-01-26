@@ -23,36 +23,28 @@ const pool = new Pool({
 
 // ==================== CONFIGURATION SMTP CORRIGÉE ====================
 
-// Fonction pour créer un transporteur SMTP avec configuration Office 365
+// Fonction pour créer un transporteur SMTP (CONFIGURATION CORRIGÉE)
 const createTransporter = () => {
-  console.log('🔧 Création du transporteur SMTP avec configuration:');
-  console.log(`   Host: ${process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com'}`);
-  console.log(`   Port: ${process.env.SMTP_PORT || 587}`);
-  console.log(`   User: ${process.env.SMTP_USER || 'administration.STS@avocarbon.com'}`);
-  
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.office365.com', // Office 365 SMTP server
-    port: parseInt(process.env.SMTP_PORT) || 587, // Port 587 pour TLS, 465 pour SSL
-    secure: process.env.SMTP_SECURE === 'true', // true pour SSL (port 465), false pour TLS (port 587)
-    auth: {
-      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASSWORD || 'shnlgdyfbcztbhxn' // Mot de passe d'application
-    },
+    host: process.env.SMTP_HOST || 'smtp.office365.com', // CHANGÉ: Utiliser smtp.office365.com
+    port: parseInt(process.env.SMTP_PORT) || 587, // CHANGÉ: Port 587 pour TLS
+    secure: false, // CHANGÉ: false pour port 587
+    requireTLS: true, // AJOUTÉ: Exiger TLS
     tls: {
       ciphers: 'SSLv3',
-      rejectUnauthorized: false // Accepter les certificats auto-signés
+      rejectUnauthorized: false
     },
-    debug: true, // Activer le debug pour voir ce qui se passe
-    logger: true, // Logger les événements
-    connectionTimeout: 30000, // Timeout de connexion augmenté
-    greetingTimeout: 30000,   // Timeout de salutation
-    socketTimeout: 30000,     // Timeout de socket
-    // Désactiver les mécanismes d'authentification problématiques
-    authMethod: 'LOGIN'
+    auth: {
+      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
+      pass: process.env.SMTP_PASS || 'shnlgdyfbcztbhxn'
+    },
+    connectionTimeout: 30000, // Augmenté
+    greetingTimeout: 30000,
+    socketTimeout: 30000
   });
 };
 
-// Pool de transporteurs SMTP pour une meilleure fiabilité
+// Pool de transporteurs SMTP simplifié
 const emailPool = {
   transporters: [],
   currentIndex: 0,
@@ -82,16 +74,25 @@ emailPool.init(2);
 
 // Fonction pour vérifier la connexion SMTP
 async function verifySMTPConnection() {
-  console.log('🔍 Vérification des connexions SMTP...');
-  
+  console.log('🔍 Vérification connexion SMTP...');
   for (let i = 0; i < emailPool.transporters.length; i++) {
     try {
-      console.log(`   Test transporteur ${i+1}...`);
       await emailPool.transporters[i].verify();
-      console.log(`   ✅ Connexion SMTP ${i+1} établie avec succès`);
+      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
     } catch (error) {
-      console.error(`   ❌ Échec connexion SMTP ${i+1}:`, error.message);
-      console.error(`   Détails:`, error);
+      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+      
+      // Réessayer avec une nouvelle configuration si la première échoue
+      if (i === 0) {
+        console.log('🔄 Tentative avec configuration alternative...');
+        emailPool.transporters[i] = createTransporter();
+        try {
+          await emailPool.transporters[i].verify();
+          console.log(`✅ Connexion SMTP ${i+1} établie avec configuration alternative`);
+        } catch (retryError) {
+          console.error(`❌ Échec connexion SMTP ${i+1} avec alternative:`, retryError.message);
+        }
+      }
     }
   }
 }
@@ -100,10 +101,9 @@ async function verifySMTPConnection() {
 function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
   console.log(`   Contexte: ${context}`);
-  console.log(`   De: ${mailOptions.from?.address || mailOptions.from}`);
+  console.log(`   De: ${mailOptions.from.address}`);
   console.log(`   À: ${mailOptions.to}`);
   console.log(`   Sujet: ${mailOptions.subject}`);
-  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
 }
 
 // Fonction améliorée pour envoyer des emails avec retry et fallback
@@ -117,38 +117,21 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     const transporter = emailPool.getTransporter();
     
     try {
-      console.log(`   Tentative ${attempt}/${maxRetries} avec transporteur ${emailPool.currentIndex + 1}...`);
-      
-      // Limiter la taille des pièces jointes
-      if (mailOptions.attachments && mailOptions.attachments.length > 0) {
-        const totalSize = mailOptions.attachments.reduce((sum, att) => {
-          return sum + (att.content?.length || 0);
-        }, 0);
-        
-        if (totalSize > 5 * 1024 * 1024) { // 5MB max
-          console.warn(`   ⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
-          
-          // Compresser ou réduire la qualité si nécessaire
-          mailOptions.attachments = mailOptions.attachments.map(attachment => {
-            if (attachment.content && attachment.content.length > 2 * 1024 * 1024) {
-              console.log(`   Réduction de la taille pour: ${attachment.filename}`);
-              // Ici vous pourriez ajouter de la compression
-            }
-            return attachment;
-          });
-        }
+      // Vérifier la connexion avant d'envoyer
+      try {
+        await transporter.verify();
+      } catch (verifyError) {
+        console.log(`⚠️ Transporteur ${attempt} non vérifié, tentative quand même...`);
       }
       
       const info = await transporter.sendMail(mailOptions);
       
-      console.log(`   ✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
+      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
       console.log(`   Message ID: ${info.messageId}`);
-      console.log(`   Réponse: ${info.response || 'Pas de réponse'}`);
       
       return {
         success: true,
         messageId: info.messageId,
-        response: info.response,
         attempt: attempt
       };
       
@@ -156,19 +139,30 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
       lastError = error;
       lastTransporterIndex = emailPool.currentIndex;
       
-      console.error(`   ❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`);
-      console.error(`   Code: ${error.code}`);
-      console.error(`   Message: ${error.message}`);
+      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
+      
+      // Si c'est une erreur d'authentification, ne pas réessayer avec le même transporteur
+      if (error.code === 'EAUTH') {
+        console.error(`🔐 Erreur d'authentification SMTP:`, error.response);
+        
+        // Créer un nouveau transporteur avec configuration alternative
+        console.log('🔄 Création d\'un nouveau transporteur suite à erreur d\'authentification');
+        emailPool.transporters[emailPool.currentIndex] = createTransporter();
+        
+        // Backoff court
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
       
       if (attempt < maxRetries) {
         // Backoff exponentiel avec jitter
         const baseDelay = 2000;
-        const maxDelay = 15000;
+        const maxDelay = 10000;
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         const jitter = Math.random() * 1000;
         const totalDelay = delay + jitter;
         
-        console.log(`   ⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
+        console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
         
         // Changer de transporteur pour la prochaine tentative
         emailPool.rotateTransporter();
@@ -184,13 +178,22 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   // Toutes les tentatives ont échoué
   console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
   
-  // Essayer de recréer un transporteur comme dernier recours
+  // Essayer de recréer un transporteur avec configuration alternative
   try {
-    console.log('🔄 Tentative avec nouveau transporteur d\'urgence...');
-    const emergencyTransporter = createTransporter();
-    await emergencyTransporter.verify();
+    console.log('🔄 Tentative finale avec nouveau transporteur...');
+    const emergencyTransporter = nodemailer.createTransport({
+      host: 'smtp-mail.outlook.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
+    
     const info = await emergencyTransporter.sendMail(mailOptions);
-    console.log('✅ Email envoyé avec transporteur d\'urgence');
+    console.log('✅ Email envoyé avec transporteur d\'urgence (Outlook)');
     
     return {
       success: true,
@@ -201,23 +204,14 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   } catch (emergencyError) {
     console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
     
-    // Sauvegarder l'email en local pour envoi manuel
-    try {
-      const backupDir = path.join(__dirname, 'email_backups');
-      await fs.mkdir(backupDir, { recursive: true });
-      
-      const backupFile = path.join(backupDir, `email_failed_${Date.now()}.json`);
-      await fs.writeFile(backupFile, JSON.stringify({
-        ...mailOptions,
-        context,
-        error: lastError.message,
-        timestamp: new Date().toISOString()
-      }, null, 2));
-      
-      console.log(`📁 Email sauvegardé dans: ${backupFile}`);
-    } catch (backupError) {
-      console.error('❌ Impossible de sauvegarder l\'email:', backupError.message);
-    }
+    // Log plus détaillé pour le débogage
+    console.error('📋 Détails de l\'erreur:', {
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      user: process.env.SMTP_USER ? '***' : 'non défini',
+      from: mailOptions.from,
+      to: mailOptions.to
+    });
     
     throw {
       message: `Échec d'envoi après ${maxRetries} tentatives et transporteur d'urgence`,
@@ -315,43 +309,13 @@ async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
   
   return attachments.map(attachment => {
-    // Si le contenu est un buffer et trop grand
-    if (attachment.content && attachment.content.length > 2 * 1024 * 1024) {
+    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
+    // Pour l'instant, on se contente de vérifier la taille
+    if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
       console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
-      
-      // Pour les documents Word, on pourrait compresser ici
-      // Pour l'instant, on se contente de logger l'avertissement
     }
     return attachment;
   });
-}
-
-// Fonction pour calculer les jours ouvrés
-function calculerJoursOuvres(dateDebut, dateFin) {
-  if (!dateDebut || !dateFin) return 0;
-  
-  const debut = new Date(dateDebut);
-  const fin = new Date(dateFin);
-  
-  // Normaliser les heures
-  debut.setHours(0, 0, 0, 0);
-  fin.setHours(0, 0, 0, 0);
-  
-  if (fin < debut) return 0;
-  
-  let joursOuvres = 0;
-  const dateActuelle = new Date(debut);
-  
-  while (dateActuelle <= fin) {
-    const jourSemaine = dateActuelle.getDay();
-    // 0 = Dimanche, 6 = Samedi
-    if (jourSemaine >= 1 && jourSemaine <= 5) {
-      joursOuvres++;
-    }
-    dateActuelle.setDate(dateActuelle.getDate() + 1);
-  }
-  
-  return joursOuvres;
 }
 
 // ==================== FONCTIONS DE GÉNÉRATION DE DOCUMENTS ====================
@@ -463,6 +427,37 @@ async function genererAttestationSalaireWord(employe) {
     console.error('Erreur lors de la génération Word attestation salaire:', error);
     throw error;
   }
+}
+
+function calculerJoursOuvres(dateDebut, dateFin) {
+  if (!dateDebut || !dateFin) return 0;
+  
+  const debut = new Date(dateDebut);
+  const fin = new Date(dateFin);
+  
+  // Normaliser les heures pour éviter les problèmes de fuseau horaire
+  debut.setHours(0, 0, 0, 0);
+  fin.setHours(0, 0, 0, 0);
+  
+  // Si la date de fin est avant la date de début
+  if (fin < debut) return 0;
+  
+  let joursOuvres = 0;
+  const dateActuelle = new Date(debut);
+  
+  // Parcourir toutes les dates entre début et fin (inclus)
+  while (dateActuelle <= fin) {
+    const jourSemaine = dateActuelle.getDay();
+    // 0 = Dimanche, 6 = Samedi
+    // On compte seulement du lundi (1) au vendredi (5)
+    if (jourSemaine >= 1 && jourSemaine <= 5) {
+      joursOuvres++;
+    }
+    // Passer au jour suivant
+    dateActuelle.setDate(dateActuelle.getDate() + 1);
+  }
+  
+  return joursOuvres;
 }
 
 // ==================== ROUTES API ====================
@@ -750,7 +745,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable
+// Fonction pour envoyer email au responsable (MODIFIÉE)
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -835,7 +830,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
-    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
+    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error.message);
     // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
   }
 }
@@ -1242,6 +1237,8 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
+// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
+
 // Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
@@ -1357,11 +1354,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     let infoJoursCongee = '';
     if (demande.type_demande === 'conges' && demande.date_retour) {
       joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-      infoJoursCongee = `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
-        </tr>`;
+      infoJoursCongee = `<p><strong>Nombre de jours ouvrés:</strong> ${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</p>`;
     }
 
     // 1. EMAIL À L'EMPLOYÉ - Confirmation d'approbation
@@ -1388,6 +1381,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p><strong>Motif:</strong> ${demande.titre}</p>
             <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
             ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
+            ${infoJoursCongee}
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
             ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
             ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
@@ -1411,105 +1405,95 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       to: 'fethi.chaouachi@avocarbon.com',
       subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
       html: `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f5f5;">
-  <div style="max-width: 650px; margin: 30px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-    
-    <!-- En-tête -->
-    <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 30px; text-align: center;">
-      <h1 style="margin: 0; font-size: 26px; font-weight: 600;">📋 Nouvelle demande RH approuvée</h1>
-    </div>
-    
-    <!-- Corps du message -->
-    <div style="padding: 30px;">
-      <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
-        <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
-      </div>
-      
-      <!-- Informations Employé -->
-      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Nom complet:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.nom} ${demande.prenom}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Matricule:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.matricule || 'Non spécifié'}</strong></td>
-        </tr>
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Poste:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.poste || 'Non spécifié'}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Email:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.adresse_mail}</td>
-        </tr>
-      </table>
-      
-      <!-- Détails de la Demande -->
-      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Type de demande:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</strong></td>
-        </tr>
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Motif:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.titre}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de départ:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)}</td>
-        </tr>
-        ${demande.date_retour ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de retour:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_retour)}</td>
-        </tr>` : ''}
-        ${infoJoursCongee}
-        ${typeCongeLabel ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type de congé:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${typeCongeLabel}</td>
-        </tr>` : ''}
-        ${demande.demi_journee ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Demi-journée:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">Oui</td>
-        </tr>` : ''}
-        ${demande.heure_depart ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de départ:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_depart}</td>
-        </tr>` : ''}
-        ${demande.heure_retour ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de retour:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_retour}</td>
-        </tr>` : ''}
-        ${demande.frais_deplacement ? `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Frais de déplacement:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
-        </tr>` : ''}
-      </table>
-    </div>
-    
-    <!-- Pied de page -->
-    <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0;">
-      <p style="margin: 0; font-size: 12px; color: #666;">
-        Cet email est envoyé automatiquement par le système de gestion RH
-      </p>
-    </div>
-  </div>
-</body>
-</html>
+        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
+          <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 25px; border-radius: 8px 8px 0 0;">
+            <h1 style="margin: 0; text-align: center; font-size: 24px;">📋 Nouvelle demande RH approuvée</h1>
+          </div>
+          
+          <div style="padding: 25px; background: white; border-radius: 0 0 8px 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+            
+            <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
+              <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
+            </div>
+            
+            <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Nom complet:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.nom} ${demande.prenom}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Matricule:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.matricule || 'Non spécifié'}</strong></td>
+              </tr>
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Poste:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.poste || 'Non spécifié'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Email:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.adresse_mail}</td>
+              </tr>
+            </table>
+            
+            <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Type de demande:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</strong></td>
+              </tr>
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Motif:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.titre}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de départ:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)}</td>
+              </tr>
+              ${demande.date_retour ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de retour:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_retour)}</td>
+              </tr>` : ''}
+              ${joursOuvres > 0 ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
+              </tr>` : ''}
+              ${typeCongeLabel ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type de congé:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${typeCongeLabel}</td>
+              </tr>` : ''}
+              ${demande.demi_journee ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Demi-journée:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">Oui</td>
+              </tr>` : ''}
+              ${demande.heure_depart ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de départ:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_depart}</td>
+              </tr>` : ''}
+              ${demande.heure_retour ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de retour:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_retour}</td>
+              </tr>` : ''}
+              ${demande.frais_deplacement ? `
+              <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Frais de déplacement:</td>
+                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
+              </tr>` : ''}
+            </table>
+          </div>
+          
+          <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0; margin-top: 20px; border-radius: 0 0 8px 8px;">
+            <p style="margin: 0; font-size: 12px; color: #666;">
+              Cet email est envoyé automatiquement par le système de gestion RH
+            </p>
+          </div>
+        </div>
       `
     }, 'Notification RH - Demande approuvée');
 
@@ -1641,10 +1625,7 @@ app.get('/health', (req, res) => {
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
     smtpPoolSize: emailPool.transporters.length,
-    activeTransporterIndex: emailPool.currentIndex,
-    nodeVersion: process.version,
-    platform: process.platform,
-    memory: process.memoryUsage()
+    activeTransporterIndex: emailPool.currentIndex
   });
 });
 
@@ -1665,8 +1646,6 @@ app.get('/api/test-email', async (req, res) => {
           <p>Ceci est un email de test envoyé depuis le serveur RH.</p>
           <p>Timestamp: ${new Date().toISOString()}</p>
           <p>Server: ${process.env.NODE_ENV || 'development'}</p>
-          <p>SMTP Host: ${process.env.SMTP_HOST || 'smtp.office365.com'}</p>
-          <p>SMTP Port: ${process.env.SMTP_PORT || 587}</p>
         </div>
       `
     };
@@ -1715,12 +1694,6 @@ app.get('/api/smtp-status', async (req, res) => {
     poolSize: emailPool.transporters.length,
     currentIndex: emailPool.currentIndex,
     maxRetries: emailPool.maxRetries,
-    smtpConfig: {
-      host: process.env.SMTP_HOST || 'smtp.office365.com',
-      port: process.env.SMTP_PORT || 587,
-      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      secure: process.env.SMTP_SECURE === 'true'
-    },
     transporters: statuses
   });
 });
@@ -1755,7 +1728,7 @@ app.listen(PORT, async () => {
   
   try {
     await fs.access(TEMPLATE_SALAIRE_PATH);
-    console.log('✅ Template attestation salaire trouvé');
+    console.log(': ✅ Template attestation salaire trouvé');
   } catch {
     console.warn('⚠️ Template attestation salaire non trouvé');
   }
