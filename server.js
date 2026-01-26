@@ -11,14 +11,15 @@ const app = express();
 
 // Configuration CORS manuelle
 const corsOptions = {
-  origin: '*', // ou spécifiez vos domaines autorisés
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Pré-vol des requêtes OPTIONS
-app.use(express.json());
+app.options('*', cors(corsOptions));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Configuration PostgreSQL
 const pool = new Pool({
@@ -30,165 +31,250 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 20000
+  connectionTimeoutMillis: 30000
 });
 
-// ==================== CONFIGURATION SMTP AMÉLIORÉE ====================
+// ==================== CONFIGURATION SMTP AVEC FALLBACK ====================
 
-// Configuration SMTP selon vos paramètres
+// Configuration principale - Direct SMTP
 const smtpConfig = {
   host: process.env.SMTP_HOST || "avocarbon-com.mail.protection.outlook.com",
   port: parseInt(process.env.SMTP_PORT) || 25,
-  secure: false, // IMPORTANT: false pour le port 25
+  secure: false,
   auth: {
     user: process.env.SMTP_USER || "administration.STS@avocarbon.com",
     pass: process.env.SMTP_PASSWORD || "shnlgdyfbcztbhxn",
   },
   tls: {
-    ciphers: 'SSLv3',
-    rejectUnauthorized: false
+    rejectUnauthorized: false,
+    ciphers: 'SSLv3'
   },
-  // Timeouts augmentés
-  connectionTimeout: 30000, // 30 secondes
-  greetingTimeout: 30000,
-  socketTimeout: 60000, // 60 secondes
-  // Configuration spécifique pour Outlook/Exchange
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 30000,
+  debug: process.env.NODE_ENV === 'development',
+  logger: process.env.NODE_ENV === 'development'
+};
+
+// Configuration alternative - Office 365 SMTP
+const smtpConfigOffice365 = {
+  host: "smtp.office365.com",
+  port: 587,
+  secure: false, // TLS
   requireTLS: true,
-  debug: process.env.NODE_ENV === 'development'
+  auth: {
+    user: process.env.SMTP_USER || "administration.STS@avocarbon.com",
+    pass: process.env.SMTP_PASSWORD || "shnlgdyfbcztbhxn",
+  },
+  tls: {
+    ciphers: 'SSLv3'
+  },
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 20000
 };
 
-console.log('📧 Configuration SMTP:');
-console.log(`   Host: ${smtpConfig.host}`);
-console.log(`   Port: ${smtpConfig.port}`);
-console.log(`   Secure: ${smtpConfig.secure}`);
-console.log(`   User: ${smtpConfig.auth.user}`);
+// Stockage des tentatives d'email
+const emailQueue = [];
+let isProcessingQueue = false;
 
-// Pool de transporteurs SMTP
-const emailPool = {
-  transporters: [],
-  currentIndex: 0,
-  maxRetries: 3,
-  retryDelay: 2000, // 2 secondes entre les tentatives
-  
-  init: function(count = 2) {
-    for (let i = 0; i < count; i++) {
-      this.transporters.push(nodemailer.createTransport(smtpConfig));
-    }
-    console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
-  },
-  
-  getTransporter: function() {
-    const transporter = this.transporters[this.currentIndex];
-    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+// Fonction pour créer un transporteur avec vérification
+async function createVerifiedTransporter(config, configName) {
+  try {
+    const transporter = nodemailer.createTransport(config);
+    await transporter.verify();
+    console.log(`✅ Connexion SMTP ${configName} établie`);
     return transporter;
-  },
-  
-  verifyAll: async function() {
-    console.log('📧 Vérification des connexions SMTP...');
-    for (let i = 0; i < this.transporters.length; i++) {
-      try {
-        await this.transporters[i].verify();
-        console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
-      } catch (error) {
-        console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
-      }
-    }
+  } catch (error) {
+    console.error(`❌ Échec connexion SMTP ${configName}:`, error.message);
+    return null;
   }
-};
-
-// Initialisation du pool
-emailPool.init(2);
-
-// Fonction pour logger les détails d'envoi d'email
-function logEmailDetails(mailOptions, context, attempt = 1) {
-  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
-  console.log(`   Contexte: ${context}`);
-  console.log(`   De: ${mailOptions.from.address}`);
-  console.log(`   À: ${mailOptions.to}`);
-  console.log(`   Sujet: ${mailOptions.subject}`);
-  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
 }
 
-// Fonction améliorée pour envoyer des emails avec retry
-async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
-  let lastError = null;
+// Gestionnaire de transporteurs
+const transporterManager = {
+  primary: null,
+  fallback: null,
+  current: null,
+  lastSuccessTime: null,
   
-  // S'assurer que le from est correctement formaté
-  if (!mailOptions.from || typeof mailOptions.from === 'string') {
-    mailOptions.from = {
-      name: 'Administration STS',
-      address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
-    };
-  }
-  
-  logEmailDetails(mailOptions, context, 1);
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const transporter = emailPool.getTransporter();
+  async initialize() {
+    console.log('📧 Initialisation des transporteurs SMTP...');
     
+    // Essayer la configuration principale
+    this.primary = await createVerifiedTransporter(smtpConfig, 'principal');
+    
+    // Essayer la configuration Office 365
+    this.fallback = await createVerifiedTransporter(smtpConfigOffice365, 'Office 365');
+    
+    // Définir le transporteur actuel
+    this.current = this.primary || this.fallback;
+    
+    if (this.current) {
+      console.log('✅ Transporteur SMTP prêt à utiliser');
+      this.lastSuccessTime = Date.now();
+    } else {
+      console.error('❌ Aucun transporteur SMTP disponible');
+    }
+  },
+  
+  getTransporter() {
+    return this.current;
+  },
+  
+  async switchTransporter() {
+    if (this.current === this.primary && this.fallback) {
+      console.log('🔄 Changement vers transporteur de secours (Office 365)');
+      this.current = this.fallback;
+    } else if (this.current === this.fallback && this.primary) {
+      console.log('🔄 Changement vers transporteur principal');
+      this.current = this.primary;
+    }
+    
+    // Vérifier le nouveau transporteur
     try {
-      console.log(`📧 Tentative ${attempt}/${maxRetries} d'envoi pour: ${context}`);
-      
-      const info = await transporter.sendMail(mailOptions);
-      
-      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
-      console.log(`   Message ID: ${info.messageId}`);
-      console.log(`   Réponse: ${info.response || 'No response'}`);
-      
-      return {
-        success: true,
-        messageId: info.messageId,
-        response: info.response,
-        attempt: attempt
-      };
-      
+      await this.current.verify();
+      this.lastSuccessTime = Date.now();
+      return true;
     } catch (error) {
-      lastError = error;
-      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
-      
-      if (attempt < maxRetries) {
-        // Attendre avant de réessayer
-        const delay = emailPool.retryDelay * attempt;
-        console.log(`⏳ Nouvelle tentative dans ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+      console.error('❌ Échec vérification transporteur après changement:', error.message);
+      return false;
+    }
+  },
+  
+  async sendMailWithRetry(mailOptions, context = 'Email') {
+    if (!this.current) {
+      throw new Error('Aucun transporteur SMTP disponible');
+    }
+    
+    let lastError = null;
+    
+    // Essayer avec le transporteur actuel d'abord
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`📧 Tentative ${attempt}/3 pour ${context} avec ${this.current === this.primary ? 'principal' : 'Office 365'}`);
         
-        // Log de la nouvelle tentative
-        logEmailDetails(mailOptions, context, attempt + 1);
+        const info = await this.current.sendMail(mailOptions);
+        
+        console.log(`✅ Email envoyé avec succès: ${context}`);
+        console.log(`   Message ID: ${info.messageId}`);
+        console.log(`   Réponse: ${info.response || 'Aucune réponse'}`);
+        
+        this.lastSuccessTime = Date.now();
+        return {
+          success: true,
+          messageId: info.messageId,
+          response: info.response,
+          attempt: attempt,
+          transporter: this.current === this.primary ? 'principal' : 'office365'
+        };
+        
+      } catch (error) {
+        lastError = error;
+        console.error(`❌ Échec tentative ${attempt}/3 pour ${context}:`, error.message);
+        
+        // Attendre avant de réessayer
+        if (attempt < 3) {
+          const delay = attempt * 2000;
+          console.log(`⏳ Attente ${delay}ms avant nouvelle tentative...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
       }
     }
-  }
-  
-  // Toutes les tentatives ont échoué
-  console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
-  
-  // Créer un nouveau transporteur comme dernier recours
-  try {
-    console.log('🔄 Tentative avec nouveau transporteur de secours...');
-    const emergencyTransporter = nodemailer.createTransport(smtpConfig);
     
-    // Vérifier la connexion d'urgence
-    await emergencyTransporter.verify();
-    console.log('✅ Connexion SMTP d\'urgence établie');
+    // Si toutes les tentatives ont échoué, essayer de changer de transporteur
+    console.log('🔄 Toutes les tentatives ont échoué, changement de transporteur...');
+    const switched = await this.switchTransporter();
     
-    const info = await emergencyTransporter.sendMail(mailOptions);
-    console.log('✅ Email envoyé avec transporteur de secours');
+    if (switched) {
+      try {
+        console.log(`📧 Nouvelle tentative avec transporteur alternatif pour ${context}`);
+        const info = await this.current.sendMail(mailOptions);
+        
+        console.log(`✅ Email envoyé avec transporteur alternatif: ${context}`);
+        this.lastSuccessTime = Date.now();
+        
+        return {
+          success: true,
+          messageId: info.messageId,
+          response: info.response,
+          attempt: 'alternate',
+          transporter: this.current === this.primary ? 'principal' : 'office365'
+        };
+      } catch (alternateError) {
+        console.error(`❌ Échec avec transporteur alternatif:`, alternateError.message);
+        lastError = alternateError;
+      }
+    }
     
-    return {
-      success: true,
-      messageId: info.messageId,
-      attempt: 'emergency',
-      warning: 'Sent with emergency transporter'
-    };
-  } catch (emergencyError) {
-    console.error('💥 Échec même avec transporteur de secours:', emergencyError.message);
-    
+    // Si tout a échoué
+    console.error(`💥 Échec final pour ${context}:`, lastError.message);
     throw {
-      message: `Échec d'envoi après ${maxRetries} tentatives et transporteur de secours`,
+      message: `Échec d'envoi après toutes les tentatives`,
       originalError: lastError,
-      emergencyError: emergencyError,
       context: context
     };
   }
+};
+
+// Initialiser les transporteurs
+transporterManager.initialize().catch(console.error);
+
+// Fonction pour ajouter un email à la file d'attente
+function queueEmail(mailOptions, context) {
+  return new Promise((resolve, reject) => {
+    emailQueue.push({
+      mailOptions,
+      context,
+      resolve,
+      reject,
+      timestamp: Date.now(),
+      retries: 0
+    });
+    
+    if (!isProcessingQueue) {
+      processEmailQueue();
+    }
+  });
+}
+
+// Traitement de la file d'attente
+async function processEmailQueue() {
+  if (isProcessingQueue || emailQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  while (emailQueue.length > 0) {
+    const email = emailQueue[0];
+    
+    try {
+      const result = await transporterManager.sendMailWithRetry(email.mailOptions, email.context);
+      email.resolve(result);
+      emailQueue.shift(); // Retirer de la file après succès
+      
+      // Petite pause entre les emails pour éviter la surcharge
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+    } catch (error) {
+      email.retries++;
+      
+      if (email.retries >= 3) {
+        // Trop de tentatives, rejeter
+        console.error(`💥 Abandon après 3 tentatives pour ${email.context}`);
+        email.reject(error);
+        emailQueue.shift();
+      } else {
+        // Remettre à la fin de la file pour réessayer plus tard
+        console.log(`↩️ Remise en file d'attente pour ${email.context} (tentative ${email.retries + 1})`);
+        emailQueue.push(emailQueue.shift());
+        
+        // Attendre plus longtemps entre les tentatives
+        await new Promise(resolve => setTimeout(resolve, 3000 * email.retries));
+      }
+    }
+  }
+  
+  isProcessingQueue = false;
 }
 
 // ==================== HELPER FUNCTIONS ====================
@@ -278,8 +364,6 @@ async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
   
   return attachments.map(attachment => {
-    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
-    // Pour l'instant, on se contente de vérifier la taille
     if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
       console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
     }
@@ -292,21 +376,11 @@ async function optimizeAttachments(attachments) {
 // Fonction pour générer une attestation de travail Word
 async function genererAttestationTravailWord(employe) {
   try {
-    // Vérifier si le template existe
-    try {
-      await fs.access(TEMPLATE_TRAVAIL_PATH);
-    } catch (error) {
-      console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
-      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
-    }
-    
-    // Lire le template Word
+    await fs.access(TEMPLATE_TRAVAIL_PATH);
     const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
     
-    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
     
-    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -317,7 +391,6 @@ async function genererAttestationTravailWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
     
-    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -342,18 +415,9 @@ async function genererAttestationTravailWord(employe) {
 // Fonction pour générer une attestation de salaire Word
 async function genererAttestationSalaireWord(employe) {
   try {
-    // Vérifier si le template existe
-    try {
-      await fs.access(TEMPLATE_SALAIRE_PATH);
-    } catch (error) {
-      console.error(`Template non trouvé: ${TEMPLATE_SALAIRE_PATH}`);
-      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
-    }
-    
-    // Lire le template Word
+    await fs.access(TEMPLATE_SALAIRE_PATH);
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
     
-    // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
       return parseFloat(salaire).toLocaleString('fr-TN', {
@@ -362,10 +426,8 @@ async function genererAttestationSalaireWord(employe) {
       }).replace(/,/g, ' ');
     };
     
-    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
     
-    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -376,7 +438,6 @@ async function genererAttestationSalaireWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
     
-    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -404,25 +465,19 @@ function calculerJoursOuvres(dateDebut, dateFin) {
   const debut = new Date(dateDebut);
   const fin = new Date(dateFin);
   
-  // Normaliser les heures pour éviter les problèmes de fuseau horaire
   debut.setHours(0, 0, 0, 0);
   fin.setHours(0, 0, 0, 0);
   
-  // Si la date de fin est avant la date de début
   if (fin < debut) return 0;
   
   let joursOuvres = 0;
   const dateActuelle = new Date(debut);
   
-  // Parcourir toutes les dates entre début et fin (inclus)
   while (dateActuelle <= fin) {
     const jourSemaine = dateActuelle.getDay();
-    // 0 = Dimanche, 6 = Samedi
-    // On compte seulement du lundi (1) au vendredi (5)
     if (jourSemaine >= 1 && jourSemaine <= 5) {
       joursOuvres++;
     }
-    // Passer au jour suivant
     dateActuelle.setDate(dateActuelle.getDate() + 1);
   }
   
@@ -431,7 +486,7 @@ function calculerJoursOuvres(dateDebut, dateFin) {
 
 // ==================== ROUTES API ====================
 
-// Récupérer tous les employés actifs (sans date de départ)
+// Récupérer tous les employés actifs
 app.get('/api/employees/actifs', async (req, res) => {
   try {
     const result = await pool.query(
@@ -455,7 +510,6 @@ app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
   try {
-    // Validation
     if (!employe_id || !type_document) {
       return res.status(400).json({ 
         error: 'Les champs employé et type de document sont obligatoires' 
@@ -464,7 +518,6 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
 
-    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
@@ -481,26 +534,22 @@ app.post('/api/generer-attestation', async (req, res) => {
     let fileName;
     let documentTypeLabel;
 
-    // Générer le document Word selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de salaire';
       
-      // Vérifier si le salaire existe
       if (!employe.salaire_brute) {
         return res.status(400).json({ 
           error: 'Salaire non disponible pour cet employé' 
         });
       }
     } else {
-      // Par défaut, attestation de travail
       wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
 
-    // Optimiser les pièces jointes
     const optimizedAttachments = await optimizeAttachments([
       {
         filename: fileName,
@@ -539,8 +588,8 @@ app.post('/api/generer-attestation', async (req, res) => {
       attachments: optimizedAttachments
     };
 
-    // Envoyer l'email avec retry
-    const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
+    // Utiliser la file d'attente pour envoyer l'email
+    const emailResult = await queueEmail(mailOptions, `Génération ${documentTypeLabel}`);
 
     res.json({ 
       success: true, 
@@ -552,8 +601,7 @@ app.post('/api/generer-attestation', async (req, res) => {
   } catch (err) {
     console.error('❌ Erreur lors de la génération d\'attestation:', err);
     res.status(500).json({ 
-      error: 'Erreur lors de la génération du document: ' + err.message,
-      details: err.details || ''
+      error: 'Erreur lors de la génération du document: ' + err.message
     });
   }
 });
@@ -583,7 +631,6 @@ app.post('/api/telecharger-attestation', async (req, res) => {
     let wordBuffer;
     let fileName;
 
-    // Générer le document selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
@@ -592,7 +639,6 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
     
-    // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', wordBuffer.length);
@@ -606,7 +652,7 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   }
 });
 
-// Créer une nouvelle demande RH (congé/autorisation/mission)
+// Créer une nouvelle demande RH
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id,
@@ -623,7 +669,6 @@ app.post('/api/demandes', async (req, res) => {
   } = req.body;
 
   try {
-    // Validation des champs obligatoires
     if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({ 
         error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
@@ -632,7 +677,6 @@ app.post('/api/demandes', async (req, res) => {
 
     console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
 
-    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
@@ -645,7 +689,6 @@ app.post('/api/demandes', async (req, res) => {
 
     const employe = employeResult.rows[0];
 
-    // Convertir les chaînes vides en null pour les champs optionnels
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
@@ -653,7 +696,6 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
-    // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
@@ -679,26 +721,31 @@ app.post('/api/demandes', async (req, res) => {
     const demandeId = insertResult.rows[0].id;
     console.log(`✅ Demande créée avec ID: ${demandeId}`);
 
-    // Envoyer email au responsable 1
+    // Envoyer email au responsable 1 via la file d'attente
     if (employe.mail_responsable1) {
-      await envoyerEmailResponsable(
-        employe,
-        employe.mail_responsable1,
-        demandeId,
-        1,
-        { 
-          type_demande, 
-          titre, 
-          date_depart, 
-          date_retour: dateRetourFinal, 
-          heure_depart: heureDepartFinal, 
-          heure_retour: heureRetourFinal, 
-          demi_journee, 
-          type_conge: typeCongeFinal,
-          type_conge_autre: typeCongeAutreFinal,
-          frais_deplacement: fraisDeplacementFinal 
-        }
-      );
+      try {
+        await envoyerEmailResponsable(
+          employe,
+          employe.mail_responsable1,
+          demandeId,
+          1,
+          { 
+            type_demande, 
+            titre, 
+            date_depart, 
+            date_retour: dateRetourFinal, 
+            heure_depart: heureDepartFinal, 
+            heure_retour: heureRetourFinal, 
+            demi_journee, 
+            type_conge: typeCongeFinal,
+            type_conge_autre: typeCongeAutreFinal,
+            frais_deplacement: fraisDeplacementFinal 
+          }
+        );
+      } catch (emailError) {
+        console.error(`❌ Erreur envoi email responsable 1:`, emailError.message);
+        // Ne pas bloquer la création de la demande en cas d'erreur d'email
+      }
     } else {
       console.warn(`⚠️ Aucun responsable 1 défini pour ${employe.nom} ${employe.prenom}`);
     }
@@ -714,7 +761,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable (MODIFIÉE)
+// Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -749,7 +796,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   }
 
-  // Si c'est pour le deuxième responsable après approbation du premier
   let infoPremierApprobation = '';
   if (premierResponsable && niveau === 2) {
     infoPremierApprobation = `
@@ -795,13 +841,9 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `
   };
 
-  try {
-    await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
-    console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
-  } catch (error) {
-    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
-    // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
-  }
+  // Utiliser la file d'attente pour envoyer l'email
+  await queueEmail(mailOptions, `Notification demande RH niveau ${niveau}`);
+  console.log(`✅ Email ajouté à la file d'attente pour ${emailResponsable} (demande ${demandeId}, niveau ${niveau})`);
 }
 
 // Page d'approbation/refus de demande
@@ -833,7 +875,6 @@ app.get('/approuver-demande', async (req, res) => {
 
     const demande = result.rows[0];
     
-    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.send(`
@@ -856,13 +897,8 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // Noms des responsables
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
-    
-    // Échapper les apostrophes dans les chaînes JavaScript
-    const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
-    const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
     
     res.send(`
       <!DOCTYPE html>
@@ -1059,7 +1095,6 @@ app.get('/approuver-demande', async (req, res) => {
         </div>
 
         <script>
-          // Déclaration des variables globales
           const demandeId = ${id};
           const niveau = ${Number(niveau) || 1};
           
@@ -1171,7 +1206,6 @@ app.get('/approuver-demande', async (req, res) => {
             }
           }
 
-          // Initialisation des événements
           document.addEventListener('DOMContentLoaded', function() {
             const approveBtn = document.getElementById('approveBtn');
             const rejectBtn = document.getElementById('rejectBtn');
@@ -1206,9 +1240,9 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
+// ==================== ROUTES D'APPROBATION ET REFUS ====================
 
-// Approuver une demande (VERSION MODIFIÉE)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -1230,7 +1264,6 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
-    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1238,20 +1271,18 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mettre à jour l'approbation (R1 ou R2) à TRUE
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
 
-    // Noms des responsables à partir de leurs emails
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
-    // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
+    // CAS 1 : Niveau 1 & responsable 2 existe
     if (niveau == 1 && demande.mail_responsable2) {
-      // Email à l'employé : approuvé par R1, en attente de R2
-      await sendEmailWithRetry({
+      // Email à l'employé
+      const mailOptionsEmploye = {
         from: {
           name: 'Administration STS',
           address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1271,9 +1302,11 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p style="color:#6b7280;font-size:14px;">Vous recevrez un nouvel email lorsque la demande sera définitivement approuvée.</p>
           </div>
         `
-      }, 'Approbation niveau 1');
+      };
 
-      // Email au responsable 2 avec mention du premier approbateur
+      await queueEmail(mailOptionsEmploye, 'Approbation niveau 1 - Employé');
+
+      // Email au responsable 2
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1300,28 +1333,25 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       });
     } 
 
-    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
+    // CAS 2 : Demande complètement approuvée
     await pool.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
     );
 
-    // Qui est l'approbateur final ?
     let approuveur = null;
     if (niveau == 1 && !demande.mail_responsable2) {
-      approuveur = resp1; // seul responsable
+      approuveur = resp1;
     } else if (niveau == 2) {
-      approuveur = resp2; // deuxième approbation
+      approuveur = resp2;
     }
 
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // ==================== NOUVEAUX EMAILS D'APPROBATION FINALE ====================
-
-    // 1. EMAIL À L'EMPLOYÉ - Confirmation d'approbation
-    await sendEmailWithRetry({
+    // Email à l'employé - Confirmation d'approbation
+    const mailOptionsFinalEmploye = {
       from: {
         name: 'Administration STS',
         address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1356,31 +1386,30 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           </p>
         </div>
       `
-    }, 'Approbation finale - Email employé');
+    };
 
-// Dans la section "// 2. EMAIL À L'ÉQUIPE RH", remplacez par :
+    await queueEmail(mailOptionsFinalEmploye, 'Approbation finale - Employé');
 
-// Calcul du nombre de jours ouvrés pour les congés
-let joursOuvres = 0;
-let infoJoursCongee = '';
-if (demande.type_demande === 'conges' && demande.date_retour) {
-  joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-  infoJoursCongee = `
+    // Email à l'équipe RH
+    let joursOuvres = 0;
+    let infoJoursCongee = '';
+    if (demande.type_demande === 'conges' && demande.date_retour) {
+      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
+      infoJoursCongee = `
 <tr>
   <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
   <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
 </tr>`;
-}
+    }
 
-// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
-await sendEmailWithRetry({
-  from: {
-    name: 'Administration STS',
-    address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
-  },
-  to: 'fethi.chaouachi@avocarbon.com',
-  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-  html: `
+    const mailOptionsRH = {
+      from: {
+        name: 'Administration STS',
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+      },
+      to: 'fethi.chaouachi@avocarbon.com',
+      subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+      html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -1390,18 +1419,15 @@ await sendEmailWithRetry({
 <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f5f5;">
   <div style="max-width: 650px; margin: 30px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
     
-    <!-- En-tête -->
     <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 30px; text-align: center;">
       <h1 style="margin: 0; font-size: 26px; font-weight: 600;">📋 Nouvelle demande RH approuvée</h1>
     </div>
     
-    <!-- Corps du message -->
     <div style="padding: 30px;">
       <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
         <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
       </div>
       
-      <!-- Informations Employé -->
       <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
         <tr>
@@ -1422,7 +1448,6 @@ await sendEmailWithRetry({
         </tr>
       </table>
       
-      <!-- Détails de la Demande -->
       <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
         <tr>
@@ -1471,7 +1496,6 @@ await sendEmailWithRetry({
       </table>
     </div>
     
-    <!-- Pied de page -->
     <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0;">
       <p style="margin: 0; font-size: 12px; color: #666;">
         Cet email est envoyé automatiquement par le système de gestion RH
@@ -1480,10 +1504,12 @@ await sendEmailWithRetry({
   </div>
 </body>
 </html>
-  `
-}, 'Notification RH - Demande approuvée');
+      `
+    };
 
-    console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
+    await queueEmail(mailOptionsRH, 'Notification RH - Demande approuvée');
+
+    console.log(`✅ Demande ${id} complètement approuvée`);
     
     res.json({ 
       success: true, 
@@ -1517,7 +1543,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
-    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1525,7 +1550,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
-    // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', 
@@ -1536,7 +1560,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       [commentaire, id]
     );
 
-    // Identité du responsable qui refuse
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
@@ -1552,7 +1575,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       : null;
 
     // Email à l'employé
-    await sendEmailWithRetry({
+    const mailOptionsRefus = {
       from: {
         name: 'Administration STS',
         address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1571,8 +1594,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
           </div>
         </div>
       `
-    }, 'Refus demande');
+    };
 
+    await queueEmail(mailOptionsRefus, 'Refus demande');
+    
     console.log(`✅ Demande ${id} refusée`);
     
     res.json({ 
@@ -1610,8 +1635,9 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
-    smtpPoolSize: emailPool.transporters.length,
-    activeTransporterIndex: emailPool.currentIndex
+    emailQueueLength: emailQueue.length,
+    isProcessingQueue: isProcessingQueue,
+    smtpStatus: transporterManager.current ? 'Connected' : 'Disconnected'
   });
 });
 
@@ -1636,7 +1662,7 @@ app.get('/api/test-email', async (req, res) => {
       `
     };
 
-    const result = await sendEmailWithRetry(testMailOptions, 'Test SMTP');
+    const result = await transporterManager.sendMailWithRetry(testMailOptions, 'Test SMTP');
     
     res.json({ 
       success: true, 
@@ -1653,35 +1679,24 @@ app.get('/api/test-email', async (req, res) => {
   }
 });
 
-// Route pour vérifier l'état des transporteurs SMTP
+// Route pour vérifier l'état SMTP
 app.get('/api/smtp-status', async (req, res) => {
-  const statuses = [];
-  
-  for (let i = 0; i < emailPool.transporters.length; i++) {
-    const transporter = emailPool.transporters[i];
-    try {
-      await transporter.verify();
-      statuses.push({
-        index: i,
-        status: 'OK',
-        isCurrent: i === emailPool.currentIndex
-      });
-    } catch (error) {
-      statuses.push({
-        index: i,
-        status: 'ERROR',
-        error: error.message,
-        isCurrent: i === emailPool.currentIndex
-      });
-    }
+  try {
+    const primaryStatus = transporterManager.primary ? 'OK' : 'NOT_INITIALIZED';
+    const fallbackStatus = transporterManager.fallback ? 'OK' : 'NOT_INITIALIZED';
+    const currentTransporter = transporterManager.current === transporterManager.primary ? 'primary' : 'fallback';
+    
+    res.json({
+      primary: primaryStatus,
+      fallback: fallbackStatus,
+      current: currentTransporter,
+      emailQueueLength: emailQueue.length,
+      isProcessingQueue: isProcessingQueue,
+      lastSuccessTime: transporterManager.lastSuccessTime ? new Date(transporterManager.lastSuccessTime).toISOString() : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-  
-  res.json({
-    poolSize: emailPool.transporters.length,
-    currentIndex: emailPool.currentIndex,
-    maxRetries: emailPool.maxRetries,
-    transporters: statuses
-  });
 });
 
 // ==================== DÉMARRAGE DU SERVEUR ====================
@@ -1700,9 +1715,6 @@ app.listen(PORT, async () => {
   🔧 Test SMTP: http://localhost:${PORT}/api/test-email
   📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
   `);
-  
-  // Vérifier la connexion SMTP au démarrage
-  await emailPool.verifyAll();
   
   // Vérifier les templates Word
   try {
