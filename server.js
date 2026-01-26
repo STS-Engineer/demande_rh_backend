@@ -21,25 +21,34 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ==================== CONFIGURATION SMTP AMÉLIORÉE ====================
+// ==================== CONFIGURATION SMTP CORRIGÉE ====================
 
-// Fonction pour créer un transporteur SMTP
+// Fonction pour créer un transporteur SMTP avec configuration Office 365
 const createTransporter = () => {
+  console.log('🔧 Création du transporteur SMTP avec configuration:');
+  console.log(`   Host: ${process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com'}`);
+  console.log(`   Port: ${process.env.SMTP_PORT || 587}`);
+  console.log(`   User: ${process.env.SMTP_USER || 'administration.STS@avocarbon.com'}`);
+  
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com',
-    port: parseInt(process.env.SMTP_PORT) || 25,
-    secure: process.env.SMTP_SECURE === 'true' || false,
+    host: process.env.SMTP_HOST || 'smtp.office365.com', // Office 365 SMTP server
+    port: parseInt(process.env.SMTP_PORT) || 587, // Port 587 pour TLS, 465 pour SSL
+    secure: process.env.SMTP_SECURE === 'true', // true pour SSL (port 465), false pour TLS (port 587)
     auth: {
       user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASS || 'shnlgdyfbcztbhxn'
+      pass: process.env.SMTP_PASSWORD || 'shnlgdyfbcztbhxn' // Mot de passe d'application
     },
     tls: {
       ciphers: 'SSLv3',
-      rejectUnauthorized: false
+      rejectUnauthorized: false // Accepter les certificats auto-signés
     },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 15000
+    debug: true, // Activer le debug pour voir ce qui se passe
+    logger: true, // Logger les événements
+    connectionTimeout: 30000, // Timeout de connexion augmenté
+    greetingTimeout: 30000,   // Timeout de salutation
+    socketTimeout: 30000,     // Timeout de socket
+    // Désactiver les mécanismes d'authentification problématiques
+    authMethod: 'LOGIN'
   });
 };
 
@@ -49,7 +58,7 @@ const emailPool = {
   currentIndex: 0,
   maxRetries: 3,
   
-  init: function(count = 3) {
+  init: function(count = 2) {
     for (let i = 0; i < count; i++) {
       this.transporters.push(createTransporter());
     }
@@ -69,16 +78,20 @@ const emailPool = {
 };
 
 // Initialisation du pool
-emailPool.init(3);
+emailPool.init(2);
 
 // Fonction pour vérifier la connexion SMTP
 async function verifySMTPConnection() {
+  console.log('🔍 Vérification des connexions SMTP...');
+  
   for (let i = 0; i < emailPool.transporters.length; i++) {
     try {
+      console.log(`   Test transporteur ${i+1}...`);
       await emailPool.transporters[i].verify();
-      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
+      console.log(`   ✅ Connexion SMTP ${i+1} établie avec succès`);
     } catch (error) {
-      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+      console.error(`   ❌ Échec connexion SMTP ${i+1}:`, error.message);
+      console.error(`   Détails:`, error);
     }
   }
 }
@@ -87,11 +100,10 @@ async function verifySMTPConnection() {
 function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
   console.log(`   Contexte: ${context}`);
-  console.log(`   Destinataire: ${mailOptions.to}`);
+  console.log(`   De: ${mailOptions.from?.address || mailOptions.from}`);
+  console.log(`   À: ${mailOptions.to}`);
   console.log(`   Sujet: ${mailOptions.subject}`);
   console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
-  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
-    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
 }
 
 // Fonction améliorée pour envoyer des emails avec retry et fallback
@@ -105,25 +117,38 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     const transporter = emailPool.getTransporter();
     
     try {
-      // Limiter la taille des pièces jointes pour éviter les timeouts
+      console.log(`   Tentative ${attempt}/${maxRetries} avec transporteur ${emailPool.currentIndex + 1}...`);
+      
+      // Limiter la taille des pièces jointes
       if (mailOptions.attachments && mailOptions.attachments.length > 0) {
         const totalSize = mailOptions.attachments.reduce((sum, att) => {
           return sum + (att.content?.length || 0);
         }, 0);
         
-        if (totalSize > 10 * 1024 * 1024) { // 10MB max
-          console.warn(`⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
+        if (totalSize > 5 * 1024 * 1024) { // 5MB max
+          console.warn(`   ⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
+          
+          // Compresser ou réduire la qualité si nécessaire
+          mailOptions.attachments = mailOptions.attachments.map(attachment => {
+            if (attachment.content && attachment.content.length > 2 * 1024 * 1024) {
+              console.log(`   Réduction de la taille pour: ${attachment.filename}`);
+              // Ici vous pourriez ajouter de la compression
+            }
+            return attachment;
+          });
         }
       }
       
       const info = await transporter.sendMail(mailOptions);
       
-      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
+      console.log(`   ✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
       console.log(`   Message ID: ${info.messageId}`);
+      console.log(`   Réponse: ${info.response || 'Pas de réponse'}`);
       
       return {
         success: true,
         messageId: info.messageId,
+        response: info.response,
         attempt: attempt
       };
       
@@ -131,17 +156,19 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
       lastError = error;
       lastTransporterIndex = emailPool.currentIndex;
       
-      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
+      console.error(`   ❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`);
+      console.error(`   Code: ${error.code}`);
+      console.error(`   Message: ${error.message}`);
       
       if (attempt < maxRetries) {
         // Backoff exponentiel avec jitter
-        const baseDelay = 1000;
-        const maxDelay = 10000;
+        const baseDelay = 2000;
+        const maxDelay = 15000;
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         const jitter = Math.random() * 1000;
         const totalDelay = delay + jitter;
         
-        console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
+        console.log(`   ⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
         
         // Changer de transporteur pour la prochaine tentative
         emailPool.rotateTransporter();
@@ -159,8 +186,9 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   
   // Essayer de recréer un transporteur comme dernier recours
   try {
-    console.log('🔄 Tentative avec nouveau transporteur...');
+    console.log('🔄 Tentative avec nouveau transporteur d\'urgence...');
     const emergencyTransporter = createTransporter();
+    await emergencyTransporter.verify();
     const info = await emergencyTransporter.sendMail(mailOptions);
     console.log('✅ Email envoyé avec transporteur d\'urgence');
     
@@ -172,6 +200,24 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     };
   } catch (emergencyError) {
     console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
+    
+    // Sauvegarder l'email en local pour envoi manuel
+    try {
+      const backupDir = path.join(__dirname, 'email_backups');
+      await fs.mkdir(backupDir, { recursive: true });
+      
+      const backupFile = path.join(backupDir, `email_failed_${Date.now()}.json`);
+      await fs.writeFile(backupFile, JSON.stringify({
+        ...mailOptions,
+        context,
+        error: lastError.message,
+        timestamp: new Date().toISOString()
+      }, null, 2));
+      
+      console.log(`📁 Email sauvegardé dans: ${backupFile}`);
+    } catch (backupError) {
+      console.error('❌ Impossible de sauvegarder l\'email:', backupError.message);
+    }
     
     throw {
       message: `Échec d'envoi après ${maxRetries} tentatives et transporteur d'urgence`,
@@ -269,13 +315,43 @@ async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
   
   return attachments.map(attachment => {
-    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
-    // Pour l'instant, on se contente de vérifier la taille
-    if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
+    // Si le contenu est un buffer et trop grand
+    if (attachment.content && attachment.content.length > 2 * 1024 * 1024) {
       console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
+      
+      // Pour les documents Word, on pourrait compresser ici
+      // Pour l'instant, on se contente de logger l'avertissement
     }
     return attachment;
   });
+}
+
+// Fonction pour calculer les jours ouvrés
+function calculerJoursOuvres(dateDebut, dateFin) {
+  if (!dateDebut || !dateFin) return 0;
+  
+  const debut = new Date(dateDebut);
+  const fin = new Date(dateFin);
+  
+  // Normaliser les heures
+  debut.setHours(0, 0, 0, 0);
+  fin.setHours(0, 0, 0, 0);
+  
+  if (fin < debut) return 0;
+  
+  let joursOuvres = 0;
+  const dateActuelle = new Date(debut);
+  
+  while (dateActuelle <= fin) {
+    const jourSemaine = dateActuelle.getDay();
+    // 0 = Dimanche, 6 = Samedi
+    if (jourSemaine >= 1 && jourSemaine <= 5) {
+      joursOuvres++;
+    }
+    dateActuelle.setDate(dateActuelle.getDate() + 1);
+  }
+  
+  return joursOuvres;
 }
 
 // ==================== FONCTIONS DE GÉNÉRATION DE DOCUMENTS ====================
@@ -388,36 +464,7 @@ async function genererAttestationSalaireWord(employe) {
     throw error;
   }
 }
-function calculerJoursOuvres(dateDebut, dateFin) {
-  if (!dateDebut || !dateFin) return 0;
-  
-  const debut = new Date(dateDebut);
-  const fin = new Date(dateFin);
-  
-  // Normaliser les heures pour éviter les problèmes de fuseau horaire
-  debut.setHours(0, 0, 0, 0);
-  fin.setHours(0, 0, 0, 0);
-  
-  // Si la date de fin est avant la date de début
-  if (fin < debut) return 0;
-  
-  let joursOuvres = 0;
-  const dateActuelle = new Date(debut);
-  
-  // Parcourir toutes les dates entre début et fin (inclus)
-  while (dateActuelle <= fin) {
-    const jourSemaine = dateActuelle.getDay();
-    // 0 = Dimanche, 6 = Samedi
-    // On compte seulement du lundi (1) au vendredi (5)
-    if (jourSemaine >= 1 && jourSemaine <= 5) {
-      joursOuvres++;
-    }
-    // Passer au jour suivant
-    dateActuelle.setDate(dateActuelle.getDate() + 1);
-  }
-  
-  return joursOuvres;
-}
+
 // ==================== ROUTES API ====================
 
 // Récupérer tous les employés actifs (sans date de départ)
@@ -502,7 +549,7 @@ app.post('/api/generer-attestation', async (req, res) => {
     const mailOptions = {
       from: {
         name: 'Administration STS',
-        address: 'administration.STS@avocarbon.com'
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
       subject: `Demande de ${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
@@ -703,7 +750,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable (MODIFIÉE)
+// Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -753,7 +800,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   const mailOptions = {
     from: {
       name: 'Administration STS',
-      address: 'administration.STS@avocarbon.com'
+      address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
     },
     to: emailResponsable,
     subject: `${niveau === 2 && premierResponsable ? '✓ ' : ''}Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
@@ -1195,9 +1242,7 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
-
-// Approuver une demande (VERSION MODIFIÉE)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -1243,7 +1288,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
-          address: 'administration.STS@avocarbon.com'
+          address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
         },
         to: demande.adresse_mail,
         subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
@@ -1307,13 +1352,23 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // ==================== NOUVEAUX EMAILS D'APPROBATION FINALE ====================
+    // Calcul du nombre de jours ouvrés pour les congés
+    let joursOuvres = 0;
+    let infoJoursCongee = '';
+    if (demande.type_demande === 'conges' && demande.date_retour) {
+      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
+      infoJoursCongee = `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
+        </tr>`;
+    }
 
     // 1. EMAIL À L'EMPLOYÉ - Confirmation d'approbation
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
-        address: 'administration.STS@avocarbon.com'
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
       subject: '✅ Votre demande RH a été approuvée',
@@ -1347,29 +1402,15 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       `
     }, 'Approbation finale - Email employé');
 
-// Dans la section "// 2. EMAIL À L'ÉQUIPE RH", remplacez par :
-
-// Calcul du nombre de jours ouvrés pour les congés
-let joursOuvres = 0;
-let infoJoursCongee = '';
-if (demande.type_demande === 'conges' && demande.date_retour) {
-  joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-  infoJoursCongee = `
-<tr>
-  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
-  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
-</tr>`;
-}
-
-// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
-await sendEmailWithRetry({
-  from: {
-    name: 'Administration STS',
-    address: 'administration.STS@avocarbon.com'
-  },
-  to: 'fethi.chaouachi@avocarbon.com',
-  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-  html: `
+    // 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
+    await sendEmailWithRetry({
+      from: {
+        name: 'Administration STS',
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+      },
+      to: 'fethi.chaouachi@avocarbon.com',
+      subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+      html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -1469,8 +1510,8 @@ await sendEmailWithRetry({
   </div>
 </body>
 </html>
-  `
-}, 'Notification RH - Demande approuvée');
+      `
+    }, 'Notification RH - Demande approuvée');
 
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
@@ -1544,7 +1585,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
-        address: 'administration.STS@avocarbon.com'
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
       },
       to: demande.adresse_mail,
       subject: 'Votre demande RH a été refusée',
@@ -1600,7 +1641,10 @@ app.get('/health', (req, res) => {
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
     smtpPoolSize: emailPool.transporters.length,
-    activeTransporterIndex: emailPool.currentIndex
+    activeTransporterIndex: emailPool.currentIndex,
+    nodeVersion: process.version,
+    platform: process.platform,
+    memory: process.memoryUsage()
   });
 });
 
@@ -1610,7 +1654,7 @@ app.get('/api/test-email', async (req, res) => {
     const testMailOptions = {
       from: {
         name: 'Administration STS',
-        address: 'administration.STS@avocarbon.com'
+        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
       subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
@@ -1621,6 +1665,8 @@ app.get('/api/test-email', async (req, res) => {
           <p>Ceci est un email de test envoyé depuis le serveur RH.</p>
           <p>Timestamp: ${new Date().toISOString()}</p>
           <p>Server: ${process.env.NODE_ENV || 'development'}</p>
+          <p>SMTP Host: ${process.env.SMTP_HOST || 'smtp.office365.com'}</p>
+          <p>SMTP Port: ${process.env.SMTP_PORT || 587}</p>
         </div>
       `
     };
@@ -1669,6 +1715,12 @@ app.get('/api/smtp-status', async (req, res) => {
     poolSize: emailPool.transporters.length,
     currentIndex: emailPool.currentIndex,
     maxRetries: emailPool.maxRetries,
+    smtpConfig: {
+      host: process.env.SMTP_HOST || 'smtp.office365.com',
+      port: process.env.SMTP_PORT || 587,
+      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
+      secure: process.env.SMTP_SECURE === 'true'
+    },
     transporters: statuses
   });
 });
