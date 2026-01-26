@@ -1,4 +1,4 @@
-aconst express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
@@ -8,148 +8,208 @@ const createReport = require('docx-templates').default;
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// Configuration CORS manuelle
+const corsOptions = {
+  origin: '*', // ou spécifiez vos domaines autorisés
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Pré-vol des requêtes OPTIONS
 app.use(express.json());
 
-// ==================== CONFIGURATION BASE DE DONNÉES ====================
+// Configuration PostgreSQL
 const pool = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
   database: process.env.DB_NAME || 'rh_application',
   password: process.env.DB_PASS || 'St$@0987',
   port: process.env.DB_PORT || 5432,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 20000
 });
 
-// ==================== SOLUTION EMAIL FONCTIONNELLE ====================
+// ==================== CONFIGURATION SMTP AMÉLIORÉE ====================
 
-// Méthode 1 : SMTP avec mot de passe d'application (Solution recommandée)
-function createSMTPTransporter() {
-  return nodemailer.createTransport({
-    host: 'smtp.office365.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
-    auth: {
-      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASSWORD || 'shnlgdyfbcztbhxn'
-    },
-    tls: {
-      ciphers: 'SSLv3',
-      rejectUnauthorized: false
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000
-  });
-}
+// Configuration SMTP selon vos paramètres
+const smtpConfig = {
+  host: process.env.SMTP_HOST || "avocarbon-com.mail.protection.outlook.com",
+  port: parseInt(process.env.SMTP_PORT) || 25,
+  secure: false, // IMPORTANT: false pour le port 25
+  auth: {
+    user: process.env.SMTP_USER || "administration.STS@avocarbon.com",
+    pass: process.env.SMTP_PASSWORD || "shnlgdyfbcztbhxn",
+  },
+  tls: {
+    ciphers: 'SSLv3',
+    rejectUnauthorized: false
+  },
+  // Timeouts augmentés
+  connectionTimeout: 30000, // 30 secondes
+  greetingTimeout: 30000,
+  socketTimeout: 60000, // 60 secondes
+  // Configuration spécifique pour Outlook/Exchange
+  requireTLS: true,
+  debug: process.env.NODE_ENV === 'development'
+};
 
-// Méthode 2 : SMTP Exchange (alternative)
-function createExchangeTransporter() {
-  return nodemailer.createTransport({
-    host: 'smtp-mail.outlook.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
-    auth: {
-      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASSWORD || 'shnlgdyfbcztbhxn'
+console.log('📧 Configuration SMTP:');
+console.log(`   Host: ${smtpConfig.host}`);
+console.log(`   Port: ${smtpConfig.port}`);
+console.log(`   Secure: ${smtpConfig.secure}`);
+console.log(`   User: ${smtpConfig.auth.user}`);
+
+// Pool de transporteurs SMTP
+const emailPool = {
+  transporters: [],
+  currentIndex: 0,
+  maxRetries: 3,
+  retryDelay: 2000, // 2 secondes entre les tentatives
+  
+  init: function(count = 2) {
+    for (let i = 0; i < count; i++) {
+      this.transporters.push(nodemailer.createTransport(smtpConfig));
     }
-  });
-}
-
-// Méthode 3 : Gmail comme fallback (si Office365 ne marche pas)
-function createGmailTransporter() {
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_PASSWORD) {
-    return null;
+    console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
+  },
+  
+  getTransporter: function() {
+    const transporter = this.transporters[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
+    return transporter;
+  },
+  
+  verifyAll: async function() {
+    console.log('📧 Vérification des connexions SMTP...');
+    for (let i = 0; i < this.transporters.length; i++) {
+      try {
+        await this.transporters[i].verify();
+        console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
+      } catch (error) {
+        console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+      }
+    }
   }
-  
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_PASSWORD
-    }
-  });
+};
+
+// Initialisation du pool
+emailPool.init(2);
+
+// Fonction pour logger les détails d'envoi d'email
+function logEmailDetails(mailOptions, context, attempt = 1) {
+  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
+  console.log(`   Contexte: ${context}`);
+  console.log(`   De: ${mailOptions.from.address}`);
+  console.log(`   À: ${mailOptions.to}`);
+  console.log(`   Sujet: ${mailOptions.subject}`);
+  console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
 }
 
-// Fonction principale pour envoyer des emails avec fallback
-async function sendEmail(mailOptions, context = 'Email système') {
-  console.log(`📧 Tentative envoi: ${context} à ${mailOptions.to}`);
-  
+// Fonction améliorée pour envoyer des emails avec retry
+async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError = null;
   
-  // Essayer SMTP Office365 d'abord
-  try {
-    const transporter = createSMTPTransporter();
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email envoyé via Office365 (${context})`);
-    return { 
-      success: true, 
-      method: 'office365', 
-      messageId: info.messageId 
+  // S'assurer que le from est correctement formaté
+  if (!mailOptions.from || typeof mailOptions.from === 'string') {
+    mailOptions.from = {
+      name: 'Administration STS',
+      address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
     };
-  } catch (error1) {
-    lastError = error1;
-    console.log(`⚠️ Office365 échoué, tentative Exchange... (${context})`);
   }
   
-  // Essayer Exchange
-  try {
-    const transporter = createExchangeTransporter();
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email envoyé via Exchange (${context})`);
-    return { 
-      success: true, 
-      method: 'exchange', 
-      messageId: info.messageId 
-    };
-  } catch (error2) {
-    lastError = error2;
-    console.log(`⚠️ Exchange échoué... (${context})`);
-  }
+  logEmailDetails(mailOptions, context, 1);
   
-  // Essayer Gmail comme dernier recours
-  const gmailTransporter = createGmailTransporter();
-  if (gmailTransporter) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const transporter = emailPool.getTransporter();
+    
     try {
-      const gmailOptions = {
-        ...mailOptions,
-        from: process.env.GMAIL_USER
-      };
-      const info = await gmailTransporter.sendMail(gmailOptions);
-      console.log(`⚠️ Email envoyé via Gmail (fallback) (${context})`);
-      return { 
-        success: true, 
-        method: 'gmail-fallback', 
+      console.log(`📧 Tentative ${attempt}/${maxRetries} d'envoi pour: ${context}`);
+      
+      const info = await transporter.sendMail(mailOptions);
+      
+      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
+      console.log(`   Message ID: ${info.messageId}`);
+      console.log(`   Réponse: ${info.response || 'No response'}`);
+      
+      return {
+        success: true,
         messageId: info.messageId,
-        warning: 'Email envoyé via Gmail en fallback' 
+        response: info.response,
+        attempt: attempt
       };
-    } catch (error3) {
-      lastError = error3;
+      
+    } catch (error) {
+      lastError = error;
+      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
+      
+      if (attempt < maxRetries) {
+        // Attendre avant de réessayer
+        const delay = emailPool.retryDelay * attempt;
+        console.log(`⏳ Nouvelle tentative dans ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        
+        // Log de la nouvelle tentative
+        logEmailDetails(mailOptions, context, attempt + 1);
+      }
     }
   }
   
-  // Toutes les méthodes ont échoué
-  console.error(`💥 Échec d'envoi email pour ${context}:`, lastError.message);
-  throw {
-    message: `Impossible d'envoyer l'email après toutes les tentatives: ${context}`,
-    error: lastError
-  };
+  // Toutes les tentatives ont échoué
+  console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
+  
+  // Créer un nouveau transporteur comme dernier recours
+  try {
+    console.log('🔄 Tentative avec nouveau transporteur de secours...');
+    const emergencyTransporter = nodemailer.createTransport(smtpConfig);
+    
+    // Vérifier la connexion d'urgence
+    await emergencyTransporter.verify();
+    console.log('✅ Connexion SMTP d\'urgence établie');
+    
+    const info = await emergencyTransporter.sendMail(mailOptions);
+    console.log('✅ Email envoyé avec transporteur de secours');
+    
+    return {
+      success: true,
+      messageId: info.messageId,
+      attempt: 'emergency',
+      warning: 'Sent with emergency transporter'
+    };
+  } catch (emergencyError) {
+    console.error('💥 Échec même avec transporteur de secours:', emergencyError.message);
+    
+    throw {
+      message: `Échec d'envoi après ${maxRetries} tentatives et transporteur de secours`,
+      originalError: lastError,
+      emergencyError: emergencyError,
+      context: context
+    };
+  }
 }
 
-// ==================== CONFIGURATION GÉNÉRALE ====================
+// ==================== HELPER FUNCTIONS ====================
 
+// URL de base (backend déployé)
 const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
+
+// Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 
 // Helper : extraire nom/prénom depuis l'adresse email
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
+
   const localPart = email.split('@')[0];
   const rawParts = localPart.split(/[._-]+/).filter(Boolean);
-  const capitalize = (str) => str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
+
+  const capitalize = (str) =>
+    str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : '';
+
   if (rawParts.length >= 2) {
     const prenom = capitalize(rawParts[0]);
     const nom = capitalize(rawParts[1]);
@@ -163,28 +223,38 @@ function extraireNomPrenomDepuisEmail(email) {
 // Helper : générer une référence unique
 function genererReference(nom, prenom) {
   const now = new Date();
+  
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
+  
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
   const annee = now.getFullYear();
   const heures = String(now.getHours()).padStart(2, '0');
   const minutes = String(now.getMinutes()).padStart(2, '0');
   const secondes = String(now.getSeconds()).padStart(2, '0');
+  
   return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
 
-// Helper : formatage date française
+// Helper : formatage date française (JJ/MM/AAAA)
 function formatDateFR(date) {
   if (!date) return '';
-  if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) return date;
+  
+  if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+    return date;
+  }
+  
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return '';
+  
   const jour = String(d.getDate()).padStart(2, '0');
   const mois = String(d.getMonth() + 1).padStart(2, '0');
   const annee = d.getFullYear();
+  
   return `${jour}/${mois}/${annee}`;
 }
 
+// Helper : formatage simple de date (sans heure)
 function formatDateShort(date) {
   if (!date) return '';
   const d = new Date(date);
@@ -192,21 +262,51 @@ function formatDateShort(date) {
   return d.toLocaleDateString('fr-FR');
 }
 
+// Helper : label type de congé
 function getTypeCongeLabel(type_conge, type_conge_autre) {
   if (!type_conge) return 'Non spécifié';
   if (type_conge === 'annuel') return 'Congé annuel';
   if (type_conge === 'sans_solde') return 'Congé sans solde';
-  if (type_conge === 'autre') return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
+  if (type_conge === 'autre') {
+    return `Autre${type_conge_autre ? ` (${type_conge_autre})` : ''}`;
+  }
   return type_conge;
+}
+
+// Fonction pour compresser les pièces jointes si nécessaire
+async function optimizeAttachments(attachments) {
+  if (!attachments || attachments.length === 0) return attachments;
+  
+  return attachments.map(attachment => {
+    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
+    // Pour l'instant, on se contente de vérifier la taille
+    if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
+      console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
+    }
+    return attachment;
+  });
 }
 
 // ==================== FONCTIONS DE GÉNÉRATION DE DOCUMENTS ====================
 
+// Fonction pour générer une attestation de travail Word
 async function genererAttestationTravailWord(employe) {
   try {
-    await fs.access(TEMPLATE_TRAVAIL_PATH);
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_TRAVAIL_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
+    
+    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
+    
+    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -216,6 +316,8 @@ async function genererAttestationTravailWord(employe) {
       poste: employe.poste || '',
       date_actuelle: formatDateFR(new Date())
     };
+    
+    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -226,18 +328,32 @@ async function genererAttestationTravailWord(employe) {
         capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
       }
     });
-    console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom}`);
+    
+    console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
+    
   } catch (error) {
-    console.error('❌ Erreur génération attestation travail:', error);
+    console.error('Erreur lors de la génération Word attestation travail:', error);
     throw error;
   }
 }
 
+// Fonction pour générer une attestation de salaire Word
 async function genererAttestationSalaireWord(employe) {
   try {
-    await fs.access(TEMPLATE_SALAIRE_PATH);
+    // Vérifier si le template existe
+    try {
+      await fs.access(TEMPLATE_SALAIRE_PATH);
+    } catch (error) {
+      console.error(`Template non trouvé: ${TEMPLATE_SALAIRE_PATH}`);
+      throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
+    }
+    
+    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
+    
+    // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
       return parseFloat(salaire).toLocaleString('fr-TN', {
@@ -245,7 +361,11 @@ async function genererAttestationSalaireWord(employe) {
         maximumFractionDigits: 2
       }).replace(/,/g, ' ');
     };
+    
+    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
+    
+    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -255,6 +375,8 @@ async function genererAttestationSalaireWord(employe) {
       salaire: formaterSalaire(employe.salaire_brute),
       date_actuelle: formatDateFR(new Date())
     };
+    
+    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -265,34 +387,51 @@ async function genererAttestationSalaireWord(employe) {
         capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
       }
     });
-    console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom}`);
+    
+    console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
+    
     return reportBuffer;
+    
   } catch (error) {
-    console.error('❌ Erreur génération attestation salaire:', error);
+    console.error('Erreur lors de la génération Word attestation salaire:', error);
     throw error;
   }
 }
 
 function calculerJoursOuvres(dateDebut, dateFin) {
   if (!dateDebut || !dateFin) return 0;
+  
   const debut = new Date(dateDebut);
   const fin = new Date(dateFin);
+  
+  // Normaliser les heures pour éviter les problèmes de fuseau horaire
   debut.setHours(0, 0, 0, 0);
   fin.setHours(0, 0, 0, 0);
+  
+  // Si la date de fin est avant la date de début
   if (fin < debut) return 0;
+  
   let joursOuvres = 0;
   const dateActuelle = new Date(debut);
+  
+  // Parcourir toutes les dates entre début et fin (inclus)
   while (dateActuelle <= fin) {
     const jourSemaine = dateActuelle.getDay();
-    if (jourSemaine >= 1 && jourSemaine <= 5) joursOuvres++;
+    // 0 = Dimanche, 6 = Samedi
+    // On compte seulement du lundi (1) au vendredi (5)
+    if (jourSemaine >= 1 && jourSemaine <= 5) {
+      joursOuvres++;
+    }
+    // Passer au jour suivant
     dateActuelle.setDate(dateActuelle.getDate() + 1);
   }
+  
   return joursOuvres;
 }
 
 // ==================== ROUTES API ====================
 
-// Récupérer tous les employés actifs
+// Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
   try {
     const result = await pool.query(
@@ -311,17 +450,21 @@ app.get('/api/employees/actifs', async (req, res) => {
   }
 });
 
-// Générer une attestation Word et l'envoyer par email
+// Route pour générer une attestation Word et l'envoyer par email
 app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
   try {
+    // Validation
     if (!employe_id || !type_document) {
-      return res.status(400).json({ error: 'Les champs employé et type de document sont obligatoires' });
+      return res.status(400).json({ 
+        error: 'Les champs employé et type de document sont obligatoires' 
+      });
     }
 
     console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
 
+    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
@@ -334,21 +477,39 @@ app.post('/api/generer-attestation', async (req, res) => {
     }
 
     const employe = employeResult.rows[0];
-    let wordBuffer, fileName, documentTypeLabel;
+    let wordBuffer;
+    let fileName;
+    let documentTypeLabel;
 
+    // Générer le document Word selon le type
     if (type_document === 'attestation_salaire') {
-      if (!employe.salaire_brute) {
-        return res.status(400).json({ error: 'Salaire non disponible pour cet employé' });
-      }
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de salaire';
+      
+      // Vérifier si le salaire existe
+      if (!employe.salaire_brute) {
+        return res.status(400).json({ 
+          error: 'Salaire non disponible pour cet employé' 
+        });
+      }
     } else {
+      // Par défaut, attestation de travail
       wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
 
+    // Optimiser les pièces jointes
+    const optimizedAttachments = await optimizeAttachments([
+      {
+        filename: fileName,
+        content: wordBuffer,
+        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      }
+    ]);
+
+    // Préparer l'email
     const mailOptions = {
       from: {
         name: 'Administration STS',
@@ -375,14 +536,11 @@ app.post('/api/generer-attestation', async (req, res) => {
           </p>
         </div>
       `,
-      attachments: [{
-        filename: fileName,
-        content: wordBuffer,
-        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      }]
+      attachments: optimizedAttachments
     };
 
-    const emailResult = await sendEmail(mailOptions, `Génération ${documentTypeLabel}`);
+    // Envoyer l'email avec retry
+    const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
 
     res.json({ 
       success: true, 
@@ -394,12 +552,13 @@ app.post('/api/generer-attestation', async (req, res) => {
   } catch (err) {
     console.error('❌ Erreur lors de la génération d\'attestation:', err);
     res.status(500).json({ 
-      error: 'Erreur lors de la génération du document: ' + err.message
+      error: 'Erreur lors de la génération du document: ' + err.message,
+      details: err.details || ''
     });
   }
 });
 
-// Télécharger l'attestation directement
+// Route pour télécharger l'attestation directement
 app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
@@ -421,8 +580,10 @@ app.post('/api/telecharger-attestation', async (req, res) => {
     }
 
     const employe = employeResult.rows[0];
-    let wordBuffer, fileName;
+    let wordBuffer;
+    let fileName;
 
+    // Générer le document selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
@@ -431,6 +592,7 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
     
+    // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', wordBuffer.length);
@@ -444,7 +606,7 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   }
 });
 
-// Créer une nouvelle demande RH
+// Créer une nouvelle demande RH (congé/autorisation/mission)
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id,
@@ -461,6 +623,7 @@ app.post('/api/demandes', async (req, res) => {
   } = req.body;
 
   try {
+    // Validation des champs obligatoires
     if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({ 
         error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
@@ -469,6 +632,7 @@ app.post('/api/demandes', async (req, res) => {
 
     console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
 
+    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
@@ -480,6 +644,8 @@ app.post('/api/demandes', async (req, res) => {
     }
 
     const employe = employeResult.rows[0];
+
+    // Convertir les chaînes vides en null pour les champs optionnels
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
@@ -487,6 +653,7 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
+    // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
@@ -494,9 +661,18 @@ app.post('/api/demandes', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
-        employe_id, type_demande, titre, date_depart, dateRetourFinal,
-        heureDepartFinal, heureRetourFinal, demi_journee || false, typeCongeFinal,
-        typeCongeAutreFinal, fraisDeplacementFinal, 'en_attente'
+        employe_id, 
+        type_demande, 
+        titre, 
+        date_depart, 
+        dateRetourFinal,
+        heureDepartFinal, 
+        heureRetourFinal, 
+        demi_journee || false, 
+        typeCongeFinal,
+        typeCongeAutreFinal,
+        fraisDeplacementFinal,
+        'en_attente'
       ]
     );
 
@@ -511,9 +687,14 @@ app.post('/api/demandes', async (req, res) => {
         demandeId,
         1,
         { 
-          type_demande, titre, date_depart, date_retour: dateRetourFinal, 
-          heure_depart: heureDepartFinal, heure_retour: heureRetourFinal, 
-          demi_journee, type_conge: typeCongeFinal,
+          type_demande, 
+          titre, 
+          date_depart, 
+          date_retour: dateRetourFinal, 
+          heure_depart: heureDepartFinal, 
+          heure_retour: heureRetourFinal, 
+          demi_journee, 
+          type_conge: typeCongeFinal,
           type_conge_autre: typeCongeAutreFinal,
           frais_deplacement: fraisDeplacementFinal 
         }
@@ -533,7 +714,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable
+// Fonction pour envoyer email au responsable (MODIFIÉE)
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -568,6 +749,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   }
 
+  // Si c'est pour le deuxième responsable après approbation du premier
   let infoPremierApprobation = '';
   if (premierResponsable && niveau === 2) {
     infoPremierApprobation = `
@@ -614,14 +796,15 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   };
 
   try {
-    await sendEmail(mailOptions, `Notification demande RH niveau ${niveau}`);
+    await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
-    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error.message);
+    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
+    // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
   }
 }
 
-// Page d'approbation de demande
+// Page d'approbation/refus de demande
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
   
@@ -650,6 +833,7 @@ app.get('/approuver-demande', async (req, res) => {
 
     const demande = result.rows[0];
     
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.send(`
@@ -672,8 +856,13 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
+    // Noms des responsables
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
+    
+    // Échapper les apostrophes dans les chaînes JavaScript
+    const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
+    const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
     
     res.send(`
       <!DOCTYPE html>
@@ -870,6 +1059,7 @@ app.get('/approuver-demande', async (req, res) => {
         </div>
 
         <script>
+          // Déclaration des variables globales
           const demandeId = ${id};
           const niveau = ${Number(niveau) || 1};
           
@@ -981,6 +1171,7 @@ app.get('/approuver-demande', async (req, res) => {
             }
           }
 
+          // Initialisation des événements
           document.addEventListener('DOMContentLoaded', function() {
             const approveBtn = document.getElementById('approveBtn');
             const rejectBtn = document.getElementById('rejectBtn');
@@ -1015,7 +1206,9 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// Approuver une demande
+// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
+
+// Approuver une demande (VERSION MODIFIÉE)
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -1037,6 +1230,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1044,17 +1238,20 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
+    // Mettre à jour l'approbation (R1 ou R2) à TRUE
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
 
+    // Noms des responsables à partir de leurs emails
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
-    // CAS 1 : Niveau 1 & responsable 2 existe
+    // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
-      await sendEmail({
+      // Email à l'employé : approuvé par R1, en attente de R2
+      await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
           address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1076,6 +1273,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         `
       }, 'Approbation niveau 1');
 
+      // Email au responsable 2 avec mention du premier approbateur
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1102,32 +1300,28 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       });
     } 
 
-    // CAS 2 : Demande complètement approuvée
+    // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
     await pool.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
     );
 
+    // Qui est l'approbateur final ?
     let approuveur = null;
     if (niveau == 1 && !demande.mail_responsable2) {
-      approuveur = resp1;
+      approuveur = resp1; // seul responsable
     } else if (niveau == 2) {
-      approuveur = resp2;
+      approuveur = resp2; // deuxième approbation
     }
 
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    let joursOuvres = 0;
-    let infoJoursCongee = '';
-    if (demande.type_demande === 'conges' && demande.date_retour) {
-      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-      infoJoursCongee = `<p><strong>Nombre de jours ouvrés:</strong> ${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</p>`;
-    }
+    // ==================== NOUVEAUX EMAILS D'APPROBATION FINALE ====================
 
-    // Email à l'employé
-    await sendEmail({
+    // 1. EMAIL À L'EMPLOYÉ - Confirmation d'approbation
+    await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
         address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1150,7 +1344,6 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p><strong>Motif:</strong> ${demande.titre}</p>
             <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
             ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
-            ${infoJoursCongee}
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
             ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
             ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
@@ -1165,108 +1358,132 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       `
     }, 'Approbation finale - Email employé');
 
-    // Email à l'équipe RH
-    await sendEmail({
-      from: {
-        name: 'Administration STS',
-        address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
-      },
-      to: 'fethi.chaouachi@avocarbon.com',
-      subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
-          <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 25px; border-radius: 8px 8px 0 0;">
-            <h1 style="margin: 0; text-align: center; font-size: 24px;">📋 Nouvelle demande RH approuvée</h1>
-          </div>
-          
-          <div style="padding: 25px; background: white; border-radius: 0 0 8px 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            
-            <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
-              <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
-            </div>
-            
-            <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
-            <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Nom complet:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.nom} ${demande.prenom}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Matricule:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.matricule || 'Non spécifié'}</strong></td>
-              </tr>
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Poste:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.poste || 'Non spécifié'}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Email:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.adresse_mail}</td>
-              </tr>
-            </table>
-            
-            <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
-            <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Type de demande:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</strong></td>
-              </tr>
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Motif:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.titre}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de départ:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)}</td>
-              </tr>
-              ${demande.date_retour ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de retour:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_retour)}</td>
-              </tr>` : ''}
-              ${joursOuvres > 0 ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
-              </tr>` : ''}
-              ${typeCongeLabel ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type de congé:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${typeCongeLabel}</td>
-              </tr>` : ''}
-              ${demande.demi_journee ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Demi-journée:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">Oui</td>
-              </tr>` : ''}
-              ${demande.heure_depart ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de départ:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_depart}</td>
-              </tr>` : ''}
-              ${demande.heure_retour ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de retour:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_retour}</td>
-              </tr>` : ''}
-              ${demande.frais_deplacement ? `
-              <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Frais de déplacement:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
-              </tr>` : ''}
-            </table>
-          </div>
-          
-          <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0; margin-top: 20px; border-radius: 0 0 8px 8px;">
-            <p style="margin: 0; font-size: 12px; color: #666;">
-              Cet email est envoyé automatiquement par le système de gestion RH
-            </p>
-          </div>
-        </div>
-      `
-    }, 'Notification RH - Demande approuvée');
+// Dans la section "// 2. EMAIL À L'ÉQUIPE RH", remplacez par :
 
-    console.log(`✅ Demande ${id} complètement approuvée`);
+// Calcul du nombre de jours ouvrés pour les congés
+let joursOuvres = 0;
+let infoJoursCongee = '';
+if (demande.type_demande === 'conges' && demande.date_retour) {
+  joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
+  infoJoursCongee = `
+<tr>
+  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
+  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
+</tr>`;
+}
+
+// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
+await sendEmailWithRetry({
+  from: {
+    name: 'Administration STS',
+    address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
+  },
+  to: 'fethi.chaouachi@avocarbon.com',
+  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+  html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f5f5;">
+  <div style="max-width: 650px; margin: 30px auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+    
+    <!-- En-tête -->
+    <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 30px; text-align: center;">
+      <h1 style="margin: 0; font-size: 26px; font-weight: 600;">📋 Nouvelle demande RH approuvée</h1>
+    </div>
+    
+    <!-- Corps du message -->
+    <div style="padding: 30px;">
+      <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
+        <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
+      </div>
+      
+      <!-- Informations Employé -->
+      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Nom complet:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.nom} ${demande.prenom}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Matricule:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.matricule || 'Non spécifié'}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Poste:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.poste || 'Non spécifié'}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Email:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.adresse_mail}</td>
+        </tr>
+      </table>
+      
+      <!-- Détails de la Demande -->
+      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Type de demande:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Motif:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.titre}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de départ:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)}</td>
+        </tr>
+        ${demande.date_retour ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de retour:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_retour)}</td>
+        </tr>` : ''}
+        ${infoJoursCongee}
+        ${typeCongeLabel ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type de congé:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${typeCongeLabel}</td>
+        </tr>` : ''}
+        ${demande.demi_journee ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Demi-journée:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">Oui</td>
+        </tr>` : ''}
+        ${demande.heure_depart ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de départ:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_depart}</td>
+        </tr>` : ''}
+        ${demande.heure_retour ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de retour:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_retour}</td>
+        </tr>` : ''}
+        ${demande.frais_deplacement ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Frais de déplacement:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
+        </tr>` : ''}
+      </table>
+    </div>
+    
+    <!-- Pied de page -->
+    <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #e0e0e0;">
+      <p style="margin: 0; font-size: 12px; color: #666;">
+        Cet email est envoyé automatiquement par le système de gestion RH
+      </p>
+    </div>
+  </div>
+</body>
+</html>
+  `
+}, 'Notification RH - Demande approuvée');
+
+    console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
     res.json({ 
       success: true, 
@@ -1300,6 +1517,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
+    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1307,6 +1525,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     
+    // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', 
@@ -1317,6 +1536,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       [commentaire, id]
     );
 
+    // Identité du responsable qui refuse
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
@@ -1332,7 +1552,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       : null;
 
     // Email à l'employé
-    await sendEmail({
+    await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
         address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
@@ -1384,19 +1604,18 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
 
 // ==================== ROUTES DE DIAGNOSTIC ====================
 
+// Route de santé
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
-    emailMethods: {
-      office365: !!process.env.SMTP_USER,
-      exchange: true,
-      gmail: !!process.env.GMAIL_USER
-    }
+    smtpPoolSize: emailPool.transporters.length,
+    activeTransporterIndex: emailPool.currentIndex
   });
 });
 
+// Route pour tester la configuration SMTP
 app.get('/api/test-email', async (req, res) => {
   try {
     const testMailOptions = {
@@ -1405,31 +1624,64 @@ app.get('/api/test-email', async (req, res) => {
         address: process.env.SMTP_FROM || 'administration.STS@avocarbon.com'
       },
       to: 'majed.messai@avocarbon.com',
-      subject: 'Test Email - ' + new Date().toISOString(),
-      text: 'Ceci est un email de test.',
+      subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
+      text: 'Ceci est un email de test pour vérifier la configuration SMTP.',
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #2563eb;">Test Email</h2>
+          <h2 style="color: #2563eb;">Test SMTP Configuration</h2>
           <p>Ceci est un email de test envoyé depuis le serveur RH.</p>
           <p>Timestamp: ${new Date().toISOString()}</p>
+          <p>Server: ${process.env.NODE_ENV || 'development'}</p>
         </div>
       `
     };
 
-    const result = await sendEmail(testMailOptions, 'Test Email');
+    const result = await sendEmailWithRetry(testMailOptions, 'Test SMTP');
     
     res.json({ 
       success: true, 
-      message: 'Email de test envoyé',
+      message: 'Email de test envoyé avec succès',
       result: result
     });
   } catch (error) {
     console.error('❌ Erreur test email:', error);
     res.status(500).json({ 
       success: false, 
-      error: error.message
+      error: error.message,
+      details: error.originalError ? error.originalError.message : ''
     });
   }
+});
+
+// Route pour vérifier l'état des transporteurs SMTP
+app.get('/api/smtp-status', async (req, res) => {
+  const statuses = [];
+  
+  for (let i = 0; i < emailPool.transporters.length; i++) {
+    const transporter = emailPool.transporters[i];
+    try {
+      await transporter.verify();
+      statuses.push({
+        index: i,
+        status: 'OK',
+        isCurrent: i === emailPool.currentIndex
+      });
+    } catch (error) {
+      statuses.push({
+        index: i,
+        status: 'ERROR',
+        error: error.message,
+        isCurrent: i === emailPool.currentIndex
+      });
+    }
+  }
+  
+  res.json({
+    poolSize: emailPool.transporters.length,
+    currentIndex: emailPool.currentIndex,
+    maxRetries: emailPool.maxRetries,
+    transporters: statuses
+  });
 });
 
 // ==================== DÉMARRAGE DU SERVEUR ====================
@@ -1440,14 +1692,19 @@ app.listen(PORT, async () => {
   console.log(`
   🚀 Serveur démarré sur le port ${PORT}
   =========================================
-  📧 Système d'email avec fallback activé
+  📧 Emails d'approbation: http://localhost:${PORT}/approuver-demande
   👥 API Employés: http://localhost:${PORT}/api/employees/actifs
   📋 API Demandes: http://localhost:${PORT}/api/demandes
   📄 API Attestations: http://localhost:${PORT}/api/generer-attestation
   🩺 Santé: http://localhost:${PORT}/health
-  🔧 Test Email: http://localhost:${PORT}/api/test-email
+  🔧 Test SMTP: http://localhost:${PORT}/api/test-email
+  📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
   `);
   
+  // Vérifier la connexion SMTP au démarrage
+  await emailPool.verifyAll();
+  
+  // Vérifier les templates Word
   try {
     await fs.access(TEMPLATE_TRAVAIL_PATH);
     console.log('✅ Template attestation travail trouvé');
