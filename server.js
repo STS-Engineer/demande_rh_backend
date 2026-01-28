@@ -455,7 +455,7 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.fillColor('#1565c0')
          .fontSize(12)
          .font('Helvetica-Bold')
-         .text(' Une demande RH vient d\'être approuvée', 60, 115)
+         .text('Une demande RH vient d\'être approuvée', 60, 115)
          .font('Helvetica')
          .text('Cette demande nécessite votre attention pour le suivi administratif.', 60, 135);
 
@@ -467,7 +467,7 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.fontSize(16)
          .font('Helvetica-Bold')
          .fillColor('#1976d2')
-         .text(' Informations Employé', 50, yPosition);
+         .text('Informations Employé', 50, yPosition);
       
       yPosition += 25;
       doc.moveTo(50, yPosition).lineTo(doc.page.width - 50, yPosition).stroke('#e0e0e0');
@@ -496,7 +496,7 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.fontSize(16)
          .font('Helvetica-Bold')
          .fillColor('#1976d2')
-         .text(' Détails de la Demande', 50, yPosition);
+         .text('Détails de la Demande', 50, yPosition);
       
       yPosition += 25;
       doc.moveTo(50, yPosition).lineTo(doc.page.width - 50, yPosition).stroke('#e0e0e0');
