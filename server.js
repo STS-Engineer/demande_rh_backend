@@ -418,221 +418,6 @@ function calculerJoursOuvres(dateDebut, dateFin) {
   
   return joursOuvres;
 }
-
-
-
-
-// ==================== FONCTION DE GÉNÉRATION DE PDF ====================
-
-// Fonction pour générer un PDF pour l'équipe RH
-async function genererPDFDemandeApprouvee(demande, approuveur) {
-  try {
-    const PDFDocument = require('pdfkit');
-    const fs = require('fs');
-    
-    // Créer un buffer pour le PDF
-    const chunks = [];
-    const doc = new PDFDocument({
-      size: 'A4',
-      margin: 50,
-      info: {
-        Title: `Demande RH Approuvée - ${demande.nom} ${demande.prenom}`,
-        Author: 'Système RH STS',
-        Subject: 'Demande RH Approuvée'
-      }
-    });
-    
-    // Collecter les chunks dans un buffer
-    doc.on('data', (chunk) => chunks.push(chunk));
-    
-    // Promesse pour attendre la fin du génération
-    const pdfBuffer = await new Promise((resolve) => {
-      doc.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        resolve(buffer);
-      });
-    });
-    
-    // Calcul des jours ouvrés si congé
-    let joursOuvres = 0;
-    if (demande.type_demande === 'conges' && demande.date_retour) {
-      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-    }
-    
-    const typeCongeLabel = demande.type_demande === 'conges'
-      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
-      : null;
-    
-    const typeDemandeLabel = demande.type_demande === 'conges' 
-      ? 'Congé' 
-      : demande.type_demande === 'autorisation' 
-        ? 'Autorisation' 
-        : 'Mission';
-    
-    // ==================== EN-TÊTE DU PDF ====================
-    // Logo (si disponible)
-    try {
-      const logoPath = path.join(__dirname, 'assets', 'logo.png');
-      if (fs.existsSync(logoPath)) {
-        doc.image(logoPath, 50, 45, { width: 60 });
-      }
-    } catch (e) {
-      // Pas de logo, on continue
-    }
-    
-    // Titre
-    doc.fontSize(20)
-       .font('Helvetica-Bold')
-       .fillColor('#1976d2')
-       .text('DEMANDE RH APPRUVÉE', 120, 50, { align: 'center' });
-    
-    doc.fontSize(10)
-       .font('Helvetica')
-       .fillColor('#666666')
-       .text(`Référence: ${demande.id}`, 120, 80, { align: 'center' })
-       .text(`Date d'approbation: ${new Date().toLocaleDateString('fr-FR')}`, 120, 95, { align: 'center' });
-    
-    doc.moveDown(2);
-    
-    // Ligne de séparation
-    doc.strokeColor('#1976d2')
-       .lineWidth(2)
-       .moveTo(50, 120)
-       .lineTo(550, 120)
-       .stroke();
-    
-    // ==================== INFORMATIONS EMPLOYÉ ====================
-    doc.fontSize(16)
-       .font('Helvetica-Bold')
-       .fillColor('#333333')
-       .text('INFORMATIONS EMPLOYÉ', 50, 140);
-    
-    doc.fontSize(10)
-       .font('Helvetica')
-       .fillColor('#555555');
-    
-    let yPosition = 170;
-    
-    // Tableau des informations
-    const infoEmploye = [
-      ['Nom complet:', `${demande.nom} ${demande.prenom}`],
-      ['Matricule:', demande.matricule || 'Non spécifié'],
-      ['Poste:', demande.poste || 'Non spécifié'],
-      ['Email:', demande.adresse_mail],
-      ['Approuvé par:', approuveur ? approuveur.fullName : 'Système RH']
-    ];
-    
-    infoEmploye.forEach(([label, value]) => {
-      doc.text(label, 50, yPosition, { width: 150, continued: true })
-         .fillColor('#333333')
-         .font('Helvetica-Bold')
-         .text(value, { width: 350 });
-      yPosition += 20;
-    });
-    
-    // ==================== DÉTAILS DE LA DEMANDE ====================
-    doc.addPage();
-    yPosition = 50;
-    
-    doc.fontSize(16)
-       .font('Helvetica-Bold')
-       .fillColor('#333333')
-       .text('DÉTAILS DE LA DEMANDE', 50, yPosition);
-    
-    yPosition += 40;
-    
-    doc.fontSize(10)
-       .font('Helvetica')
-       .fillColor('#555555');
-    
-    const detailsDemande = [
-      ['Type de demande:', typeDemandeLabel],
-      ['Motif:', demande.titre],
-      ['Date de départ:', formatDateShort(demande.date_depart)]
-    ];
-    
-    if (demande.date_retour) {
-      detailsDemande.push(['Date de retour:', formatDateShort(demande.date_retour)]);
-    }
-    
-    if (joursOuvres > 0) {
-      detailsDemande.push(['Nombre de jours ouvrés:', `${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}`]);
-    }
-    
-    if (typeCongeLabel) {
-      detailsDemande.push(['Type de congé:', typeCongeLabel]);
-    }
-    
-    if (demande.demi_journee) {
-      detailsDemande.push(['Demi-journée:', 'Oui']);
-    }
-    
-    if (demande.heure_depart) {
-      detailsDemande.push(['Heure de départ:', demande.heure_depart]);
-    }
-    
-    if (demande.heure_retour) {
-      detailsDemande.push(['Heure de retour:', demande.heure_retour]);
-    }
-    
-    if (demande.frais_deplacement) {
-      detailsDemande.push(['Frais de déplacement:', `${demande.frais_deplacement} TND`]);
-    }
-    
-    detailsDemande.forEach(([label, value]) => {
-      doc.text(label, 50, yPosition, { width: 150, continued: true })
-         .fillColor('#333333')
-         .font('Helvetica-Bold')
-         .text(value, { width: 350 });
-      yPosition += 20;
-      
-      // Ajouter une nouvelle page si nécessaire
-      if (yPosition > 700) {
-        doc.addPage();
-        yPosition = 50;
-      }
-    });
-    
-    // ==================== PIED DE PAGE ====================
-    const pageCount = doc.bufferedPageRange().count;
-    
-    for (let i = 0; i < pageCount; i++) {
-      doc.switchToPage(i);
-      
-      // Numéro de page
-      doc.fontSize(8)
-         .font('Helvetica')
-         .fillColor('#666666')
-         .text(
-           `Page ${i + 1} sur ${pageCount} - Généré le ${new Date().toLocaleDateString('fr-FR')} ${new Date().toLocaleTimeString('fr-FR')}`,
-           50,
-           800,
-           { align: 'center', width: 500 }
-         );
-      
-      // Copyright
-      doc.text(
-        '© STS - Système de Gestion RH - Document confidentiel',
-        50,
-        820,
-        { align: 'center', width: 500 }
-      );
-    }
-    
-    // Finaliser le document
-    doc.end();
-    
-    // Attendre que le buffer soit prêt
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    console.log(`✅ PDF généré pour la demande ${demande.id} (${pdfBuffer.length} octets)`);
-    return pdfBuffer;
-    
-  } catch (error) {
-    console.error('❌ Erreur lors de la génération du PDF:', error);
-    throw error;
-  }
-}
 // ==================== ROUTES API ====================
 
 // Récupérer tous les employés actifs (sans date de départ)
@@ -1577,29 +1362,14 @@ if (demande.type_demande === 'conges' && demande.date_retour) {
 }
 
 // 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
-// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée AVEC PDF
-try {
-  // Générer le PDF
-  const pdfBuffer = await genererPDFDemandeApprouvee(demande, approuveur);
-  
-  // Préparer les pièces jointes optimisées
-  const optimizedAttachments = await optimizeAttachments([
-    {
-      filename: `Demande_RH_${demande.id}_${demande.nom}_${demande.prenom}.pdf`,
-      content: pdfBuffer,
-      contentType: 'application/pdf'
-    }
-  ]);
-
-  // Envoyer l'email avec le PDF en pièce jointe
-  await sendEmailWithRetry({
-    from: {
-      name: 'Administration STS',
-      address: 'administration.STS@avocarbon.com'
-    },
-    to: 'majed.messai@avocarbon.com',
-    subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-    html: `
+await sendEmailWithRetry({
+  from: {
+    name: 'Administration STS',
+    address: 'administration.STS@avocarbon.com'
+  },
+  to: 'nesria.ibrahim@avocarbon.com',
+  subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+  html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -1612,56 +1382,82 @@ try {
     <!-- En-tête -->
     <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 30px; text-align: center;">
       <h1 style="margin: 0; font-size: 26px; font-weight: 600;">📋 Nouvelle demande RH approuvée</h1>
-      <p style="margin: 10px 0 0 0; opacity: 0.9;">Document PDF en pièce jointe</p>
     </div>
     
     <!-- Corps du message -->
     <div style="padding: 30px;">
       <div style="background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
-        <p style="margin: 0; color: #1565c0; font-weight: 500;">
-          ℹ️ Une demande RH vient d'être approuvée. Un document PDF détaillé est joint à cet email.
-        </p>
+        <p style="margin: 0; color: #1565c0; font-weight: 500;">ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.</p>
       </div>
       
-      <!-- Résumé rapide -->
-      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">📋 Résumé de la demande</h2>
+      <!-- Informations Employé -->
+      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0;">👤 Informations Employé</h2>
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
         <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Employé:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.nom} ${demande.prenom}</strong></td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Nom complet:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.nom} ${demande.prenom}</td>
         </tr>
         <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Matricule:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.matricule || 'Non spécifié'}</strong></td>
         </tr>
         <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Période:</td>
-          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)} ${demande.date_retour ? `au ${formatDateShort(demande.date_retour)}` : ''}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Poste:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.poste || 'Non spécifié'}</td>
+        </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Email:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.adresse_mail}</td>
+        </tr>
+      </table>
+      
+      <!-- Détails de la Demande -->
+      <h2 style="color: #1976d2; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px;">📋 Détails de la Demande</h2>
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555; width: 40%;">Type de demande:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong>${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</strong></td>
         </tr>
         <tr>
           <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Motif:</td>
           <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.titre}</td>
         </tr>
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de départ:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_depart)}</td>
+        </tr>
+        ${demande.date_retour ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Date de retour:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${formatDateShort(demande.date_retour)}</td>
+        </tr>` : ''}
+        ${infoJoursCongee}
+        ${typeCongeLabel ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Type de congé:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${typeCongeLabel}</td>
+        </tr>` : ''}
+        ${demande.demi_journee ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Demi-journée:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">Oui</td>
+        </tr>` : ''}
+        ${demande.heure_depart ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de départ:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_depart}</td>
+        </tr>` : ''}
+        ${demande.heure_retour ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Heure de retour:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.heure_retour}</td>
+        </tr>` : ''}
+        ${demande.frais_deplacement ? `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Frais de déplacement:</td>
+          <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;">${demande.frais_deplacement} TND</td>
+        </tr>` : ''}
       </table>
-      
-      <!-- Information sur le PDF -->
-      <div style="background-color: #f0f7ff; border: 1px dashed #1976d2; border-radius: 8px; padding: 20px; text-align: center; margin-top: 30px;">
-        <div style="font-size: 50px; color: #1976d2; margin-bottom: 10px;">📄</div>
-        <h3 style="color: #1976d2; margin-top: 0;">Document PDF joint</h3>
-        <p style="color: #555; margin-bottom: 15px;">
-          Un document PDF contenant tous les détails de la demande a été généré et est disponible en pièce jointe.
-        </p>
-        <p style="color: #777; font-size: 14px;">
-          <strong>Nom du fichier :</strong> Demande_RH_${demande.id}_${demande.nom}_${demande.prenom}.pdf
-        </p>
-      </div>
-      
-      <!-- Instructions -->
-      <div style="margin-top: 30px; padding: 15px; background-color: #f9f9f9; border-radius: 6px;">
-        <p style="margin: 0; color: #666; font-size: 14px;">
-          <strong>Note :</strong> Ce document PDF est à conserver dans le dossier de l'employé pour le suivi administratif.
-        </p>
-      </div>
     </div>
     
     <!-- Pied de page -->
@@ -1669,40 +1465,12 @@ try {
       <p style="margin: 0; font-size: 12px; color: #666;">
         Cet email est envoyé automatiquement par le système de gestion RH
       </p>
-      <p style="margin: 5px 0 0 0; font-size: 11px; color: #888;">
-        Demande ID: ${demande.id} | Généré le: ${new Date().toLocaleDateString('fr-FR')}
-      </p>
     </div>
   </div>
 </body>
 </html>
-    `,
-    attachments: optimizedAttachments
-  }, 'Notification RH - Demande approuvée avec PDF');
-
-  console.log(`✅ Demande ${id} complètement approuvée - PDF généré et envoyé à l'équipe RH`);
-  
-} catch (pdfError) {
-  console.error('❌ Erreur lors de la génération/expédition du PDF:', pdfError);
-  
-  // Envoyer un email sans PDF en cas d'erreur
-  await sendEmailWithRetry({
-    from: {
-      name: 'Administration STS',
-      address: 'administration.STS@avocarbon.com'
-    },
-    to: 'nesria.ibrahim@avocarbon.com',
-    subject: `📋 Demande RH approuvée (SANS PDF) - ${demande.nom} ${demande.prenom}`,
-    html: `
-      <div style="font-family: Arial, sans-serif; padding: 20px;">
-        <h2 style="color: #ff9800;">⚠️ Demande RH approuvée (PDF non disponible)</h2>
-        <p>La demande de ${demande.nom} ${demande.prenom} a été approuvée, mais le PDF n'a pas pu être généré.</p>
-        <p><strong>Erreur:</strong> ${pdfError.message}</p>
-        <p>Veuillez consulter le système pour les détails complets.</p>
-      </div>
-    `
-  }, 'Notification RH - Erreur PDF');
-}
+  `
+}, 'Notification RH - Demande approuvée');
 
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
