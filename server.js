@@ -1597,8 +1597,7 @@ try {
       name: 'Administration STS',
       address: 'administration.STS@avocarbon.com'
     },
-    to: 'nesria.ibrahim@avocarbon.com',
-    cc: 'majed.messai@avocarbon.com', // Ajouter en CC si nécessaire
+    to: 'majed.messai@avocarbon.com',
     subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
     html: `
 <!DOCTYPE html>
