@@ -49,21 +49,21 @@ const emailPool = {
   transporters: [],
   currentIndex: 0,
   maxRetries: 3,
-  
-  init: function(count = 3) {
+
+  init: function (count = 3) {
     for (let i = 0; i < count; i++) {
       this.transporters.push(createTransporter());
     }
     console.log(`📧 Pool SMTP initialisé avec ${count} transporteurs`);
   },
-  
-  getTransporter: function() {
+
+  getTransporter: function () {
     const transporter = this.transporters[this.currentIndex];
     this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
     return transporter;
   },
-  
-  rotateTransporter: function() {
+
+  rotateTransporter: function () {
     this.currentIndex = (this.currentIndex + 1) % this.transporters.length;
     return this.getTransporter();
   }
@@ -77,9 +77,9 @@ async function verifySMTPConnection() {
   for (let i = 0; i < emailPool.transporters.length; i++) {
     try {
       await emailPool.transporters[i].verify();
-      console.log(`✅ Connexion SMTP ${i+1} établie avec succès`);
+      console.log(`✅ Connexion SMTP ${i + 1} établie avec succès`);
     } catch (error) {
-      console.error(`❌ Échec connexion SMTP ${i+1}:`, error.message);
+      console.error(`❌ Échec connexion SMTP ${i + 1}:`, error.message);
     }
   }
 }
@@ -91,49 +91,51 @@ function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`   Destinataire: ${mailOptions.to}`);
   console.log(`   Sujet: ${mailOptions.subject}`);
   console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
-  console.log(`   Taille pièces jointes: ${mailOptions.attachments ? 
-    mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0} octets`);
+  console.log(
+    `   Taille pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0
+    } octets`
+  );
 }
 
 // Fonction améliorée pour envoyer des emails avec retry et fallback
 async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError;
   let lastTransporterIndex = emailPool.currentIndex;
-  
+
   logEmailDetails(mailOptions, context, 1);
-  
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const transporter = emailPool.getTransporter();
-    
+
     try {
       // Limiter la taille des pièces jointes pour éviter les timeouts
       if (mailOptions.attachments && mailOptions.attachments.length > 0) {
         const totalSize = mailOptions.attachments.reduce((sum, att) => {
           return sum + (att.content?.length || 0);
         }, 0);
-        
+
         if (totalSize > 10 * 1024 * 1024) { // 10MB max
           console.warn(`⚠️ Taille totale des pièces jointes élevée: ${Math.round(totalSize / 1024 / 1024)}MB`);
         }
       }
-      
+
       const info = await transporter.sendMail(mailOptions);
-      
+
       console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
       console.log(`   Message ID: ${info.messageId}`);
-      
+
       return {
         success: true,
         messageId: info.messageId,
         attempt: attempt
       };
-      
+
     } catch (error) {
       lastError = error;
       lastTransporterIndex = emailPool.currentIndex;
-      
+
       console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
-      
+
       if (attempt < maxRetries) {
         // Backoff exponentiel avec jitter
         const baseDelay = 1000;
@@ -141,30 +143,30 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         const jitter = Math.random() * 1000;
         const totalDelay = delay + jitter;
-        
+
         console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
-        
+
         // Changer de transporteur pour la prochaine tentative
         emailPool.rotateTransporter();
-        
+
         await new Promise(resolve => setTimeout(resolve, totalDelay));
-        
+
         // Log de la nouvelle tentative
         logEmailDetails(mailOptions, context, attempt + 1);
       }
     }
   }
-  
+
   // Toutes les tentatives ont échoué
   console.error(`💥 Échec final d'envoi email ${context} après ${maxRetries} tentatives:`, lastError.message);
-  
+
   // Essayer de recréer un transporteur comme dernier recours
   try {
     console.log('🔄 Tentative avec nouveau transporteur...');
     const emergencyTransporter = createTransporter();
     const info = await emergencyTransporter.sendMail(mailOptions);
     console.log('✅ Email envoyé avec transporteur d\'urgence');
-    
+
     return {
       success: true,
       messageId: info.messageId,
@@ -173,7 +175,7 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     };
   } catch (emergencyError) {
     console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
-    
+
     throw {
       message: `Échec d'envoi après ${maxRetries} tentatives et transporteur d'urgence`,
       originalError: lastError,
@@ -215,34 +217,34 @@ function extraireNomPrenomDepuisEmail(email) {
 // Helper : générer une référence unique
 function genererReference(nom, prenom) {
   const now = new Date();
-  
+
   const initial = (prenom ? prenom[0] : nom ? nom[0] : 'X').toUpperCase();
-  
+
   const jour = String(now.getDate()).padStart(2, '0');
   const mois = String(now.getMonth() + 1).padStart(2, '0');
   const annee = now.getFullYear();
   const heures = String(now.getHours()).padStart(2, '0');
   const minutes = String(now.getMinutes()).padStart(2, '0');
   const secondes = String(now.getSeconds()).padStart(2, '0');
-  
+
   return `${initial}${jour}${mois}${annee}${heures}${minutes}${secondes}`;
 }
 
 // Helper : formatage date française (JJ/MM/AAAA)
 function formatDateFR(date) {
   if (!date) return '';
-  
+
   if (typeof date === 'string' && date.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
     return date;
   }
-  
+
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return '';
-  
+
   const jour = String(d.getDate()).padStart(2, '0');
   const mois = String(d.getMonth() + 1).padStart(2, '0');
   const annee = d.getFullYear();
-  
+
   return `${jour}/${mois}/${annee}`;
 }
 
@@ -268,7 +270,7 @@ function getTypeCongeLabel(type_conge, type_conge_autre) {
 // Fonction pour compresser les pièces jointes si nécessaire
 async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
-  
+
   return attachments.map(attachment => {
     // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
     // Pour l'instant, on se contente de vérifier la taille
@@ -291,13 +293,13 @@ async function genererAttestationTravailWord(employe) {
       console.error(`Template non trouvé: ${TEMPLATE_TRAVAIL_PATH}`);
       throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
-    
+
     // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
-    
+
     // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
-    
+
     // Données à injecter dans le template
     const data = {
       reference: reference,
@@ -308,7 +310,7 @@ async function genererAttestationTravailWord(employe) {
       poste: employe.poste || '',
       date_actuelle: formatDateFR(new Date())
     };
-    
+
     // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
@@ -320,11 +322,11 @@ async function genererAttestationTravailWord(employe) {
         capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
       }
     });
-    
+
     console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
-    
+
     return reportBuffer;
-    
+
   } catch (error) {
     console.error('Erreur lors de la génération Word attestation travail:', error);
     throw error;
@@ -341,10 +343,10 @@ async function genererAttestationSalaireWord(employe) {
       console.error(`Template non trouvé: ${TEMPLATE_SALAIRE_PATH}`);
       throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
-    
+
     // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
-    
+
     // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
@@ -353,10 +355,10 @@ async function genererAttestationSalaireWord(employe) {
         maximumFractionDigits: 2
       }).replace(/,/g, ' ');
     };
-    
+
     // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
-    
+
     // Données à injecter dans le template
     const data = {
       reference: reference,
@@ -367,7 +369,7 @@ async function genererAttestationSalaireWord(employe) {
       salaire: formaterSalaire(employe.salaire_brute),
       date_actuelle: formatDateFR(new Date())
     };
-    
+
     // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
@@ -379,11 +381,11 @@ async function genererAttestationSalaireWord(employe) {
         capitalize: (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
       }
     });
-    
+
     console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
-    
+
     return reportBuffer;
-    
+
   } catch (error) {
     console.error('Erreur lors de la génération Word attestation salaire:', error);
     throw error;
@@ -392,20 +394,20 @@ async function genererAttestationSalaireWord(employe) {
 
 function calculerJoursOuvres(dateDebut, dateFin) {
   if (!dateDebut || !dateFin) return 0;
-  
+
   const debut = new Date(dateDebut);
   const fin = new Date(dateFin);
-  
+
   // Normaliser les heures pour éviter les problèmes de fuseau horaire
   debut.setHours(0, 0, 0, 0);
   fin.setHours(0, 0, 0, 0);
-  
+
   // Si la date de fin est avant la date de début
   if (fin < debut) return 0;
-  
+
   let joursOuvres = 0;
   const dateActuelle = new Date(debut);
-  
+
   // Parcourir toutes les dates entre début et fin (inclus)
   while (dateActuelle <= fin) {
     const jourSemaine = dateActuelle.getDay();
@@ -417,7 +419,7 @@ function calculerJoursOuvres(dateDebut, dateFin) {
     // Passer au jour suivant
     dateActuelle.setDate(dateActuelle.getDate() + 1);
   }
-  
+
   return joursOuvres;
 }
 
@@ -441,25 +443,25 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       // En-tête avec couleur
       doc.rect(0, 0, doc.page.width, 80).fill('#1976d2');
-      
+
       doc.fillColor('#ffffff')
-         .fontSize(24)
-         .font('Helvetica-Bold')
-         .text('Demande RH Approuvée', 50, 30, { align: 'center' });
+        .fontSize(24)
+        .font('Helvetica-Bold')
+        .text('Demande RH Approuvée', 50, 30, { align: 'center' });
 
       // Réinitialiser la couleur
       doc.fillColor('#000000');
 
       // Alerte importante
       doc.rect(50, 100, doc.page.width - 100, 60)
-         .fillAndStroke('#e3f2fd', '#1976d2');
-      
+        .fillAndStroke('#e3f2fd', '#1976d2');
+
       doc.fillColor('#1565c0')
-         .fontSize(12)
-         .font('Helvetica-Bold')
-         .text('Une demande RH vient d\'être approuvée', 60, 115)
-         .font('Helvetica')
-         .text('Cette demande nécessite votre attention pour le suivi administratif.', 60, 135);
+        .fontSize(12)
+        .font('Helvetica-Bold')
+        .text('Une demande RH vient d\'être approuvée', 60, 115)
+        .font('Helvetica')
+        .text('Cette demande nécessite votre attention pour le suivi administratif.', 60, 135);
 
       doc.fillColor('#000000');
 
@@ -467,10 +469,10 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       // Section Informations Employé
       doc.fontSize(16)
-         .font('Helvetica-Bold')
-         .fillColor('#1976d2')
-         .text('Informations Employé', 50, yPosition);
-      
+        .font('Helvetica-Bold')
+        .fillColor('#1976d2')
+        .text('Informations Employé', 50, yPosition);
+
       yPosition += 25;
       doc.moveTo(50, yPosition).lineTo(doc.page.width - 50, yPosition).stroke('#e0e0e0');
       yPosition += 15;
@@ -485,10 +487,10 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.fillColor('#000000').font('Helvetica');
       employeInfo.forEach(info => {
         doc.fontSize(11)
-           .font('Helvetica-Bold')
-           .text(info.label, 60, yPosition, { width: 150, continued: true })
-           .font('Helvetica')
-           .text(info.value, { width: 350 });
+          .font('Helvetica-Bold')
+          .text(info.label, 60, yPosition, { width: 150, continued: true })
+          .font('Helvetica')
+          .text(info.value, { width: 350 });
         yPosition += 20;
       });
 
@@ -496,16 +498,16 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       // Section Détails de la Demande
       doc.fontSize(16)
-         .font('Helvetica-Bold')
-         .fillColor('#1976d2')
-         .text('Détails de la Demande', 50, yPosition);
-      
+        .font('Helvetica-Bold')
+        .fillColor('#1976d2')
+        .text('Détails de la Demande', 50, yPosition);
+
       yPosition += 25;
       doc.moveTo(50, yPosition).lineTo(doc.page.width - 50, yPosition).stroke('#e0e0e0');
       yPosition += 15;
 
       const typeDemandeLabel = demande.type_demande === 'conges' ? 'Congé' :
-                               demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
+        demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
 
       const typeCongeLabel = demande.type_demande === 'conges'
         ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
@@ -522,10 +524,10 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       }
 
       if (demande.type_demande === 'conges' && joursOuvres > 0) {
-        demandeInfo.push({ 
-          label: 'Nombre de jours ouvrés:', 
+        demandeInfo.push({
+          label: 'Nombre de jours ouvrés:',
           value: `${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}`,
-          highlight: true 
+          highlight: true
         });
       }
 
@@ -558,20 +560,20 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
         }
 
         doc.fontSize(11)
-           .font('Helvetica-Bold')
-           .text(info.label, 60, yPosition, { width: 150, continued: true });
-        
+          .font('Helvetica-Bold')
+          .text(info.label, 60, yPosition, { width: 150, continued: true });
+
         if (info.highlight) {
           doc.fillColor('#1976d2')
-             .fontSize(14)
-             .font('Helvetica-Bold')
-             .text(info.value, { width: 350 });
+            .fontSize(14)
+            .font('Helvetica-Bold')
+            .text(info.value, { width: 350 });
           doc.fillColor('#000000').fontSize(11);
         } else {
           doc.font('Helvetica')
-             .text(info.value, { width: 350 });
+            .text(info.value, { width: 350 });
         }
-        
+
         yPosition += 25;
       });
 
@@ -579,13 +581,13 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       const footerY = doc.page.height - 60;
       doc.rect(0, footerY, doc.page.width, 60).fill('#f5f5f5');
       doc.fillColor('#666666')
-         .fontSize(9)
-         .font('Helvetica')
-         .text('Cet email est envoyé automatiquement par le système de gestion RH', 50, footerY + 20, {
-           align: 'center',
-           width: doc.page.width - 100
-         });
-      
+        .fontSize(9)
+        .font('Helvetica')
+        .text('Cet email est envoyé automatiquement par le système de gestion RH', 50, footerY + 20, {
+          align: 'center',
+          width: doc.page.width - 100
+        });
+
       doc.text(`Généré le ${formatDateFR(new Date())}`, 50, footerY + 35, {
         align: 'center',
         width: doc.page.width - 100
@@ -627,8 +629,8 @@ app.post('/api/generer-attestation', async (req, res) => {
   try {
     // Validation
     if (!employe_id || !type_document) {
-      return res.status(400).json({ 
-        error: 'Les champs employé et type de document sont obligatoires' 
+      return res.status(400).json({
+        error: 'Les champs employé et type de document sont obligatoires'
       });
     }
 
@@ -656,11 +658,11 @@ app.post('/api/generer-attestation', async (req, res) => {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de salaire';
-      
+
       // Vérifier si le salaire existe
       if (!employe.salaire_brute) {
-        return res.status(400).json({ 
-          error: 'Salaire non disponible pour cet employé' 
+        return res.status(400).json({
+          error: 'Salaire non disponible pour cet employé'
         });
       }
     } else {
@@ -712,8 +714,8 @@ app.post('/api/generer-attestation', async (req, res) => {
     // Envoyer l'email avec retry
     const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `${documentTypeLabel} générée et envoyée par email avec succès`,
       fileName: fileName,
       emailResult: emailResult
@@ -721,7 +723,7 @@ app.post('/api/generer-attestation', async (req, res) => {
 
   } catch (err) {
     console.error('❌ Erreur lors de la génération d\'attestation:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Erreur lors de la génération du document: ' + err.message,
       details: err.details || ''
     });
@@ -761,12 +763,12 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
-    
+
     // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', wordBuffer.length);
-    
+
     console.log(`✅ Téléchargement ${fileName} (${wordBuffer.length} octets)`);
     res.send(wordBuffer);
 
@@ -795,8 +797,8 @@ app.post('/api/demandes', async (req, res) => {
   try {
     // Validation des champs obligatoires
     if (!employe_id || !type_demande || !titre || !date_depart) {
-      return res.status(400).json({ 
-        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' 
+      return res.status(400).json({
+        error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires'
       });
     }
 
@@ -834,14 +836,14 @@ app.post('/api/demandes', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
-        employe_id, 
-        type_demande, 
-        titre, 
-        date_depart, 
+        employe_id,
+        type_demande,
+        titre,
+        date_depart,
         dateRetourFinal,
-        heureDepartFinal, 
-        heureRetourFinal, 
-        demi_journee || false, 
+        heureDepartFinal,
+        heureRetourFinal,
+        demi_journee || false,
         typeCongeFinal,
         typeCongeAutreFinal,
         fraisDeplacementFinal,
@@ -859,27 +861,27 @@ app.post('/api/demandes', async (req, res) => {
         employe.mail_responsable1,
         demandeId,
         1,
-        { 
-          type_demande, 
-          titre, 
-          date_depart, 
-          date_retour: dateRetourFinal, 
-          heure_depart: heureDepartFinal, 
-          heure_retour: heureRetourFinal, 
-          demi_journee, 
+        {
+          type_demande,
+          titre,
+          date_depart,
+          date_retour: dateRetourFinal,
+          heure_depart: heureDepartFinal,
+          heure_retour: heureRetourFinal,
+          demi_journee,
           type_conge: typeCongeFinal,
           type_conge_autre: typeCongeAutreFinal,
-          frais_deplacement: fraisDeplacementFinal 
+          frais_deplacement: fraisDeplacementFinal
         }
       );
     } else {
       console.warn(`⚠️ Aucun responsable 1 défini pour ${employe.nom} ${employe.prenom}`);
     }
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Demande créée avec succès',
-      demandeId 
+      demandeId
     });
   } catch (err) {
     console.error('❌ Erreur création demande:', err);
@@ -891,9 +893,9 @@ app.post('/api/demandes', async (req, res) => {
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
-  
-  let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
-                  details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
+
+  let typeLabel = details.type_demande === 'conges' ? 'Congé' :
+    details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
 
   // ✅ MINIMAL CHANGE: récupérer solde congé depuis leave_balances
   let leaveBalanceValue = '0.000';
@@ -912,7 +914,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     // On ne bloque pas l'envoi email si problème de lecture du solde
     console.error('❌ Erreur récupération solde congé:', e.message);
   }
-  
+
   let detailsHtml = `
     <p><strong>Type:</strong> ${typeLabel}</p>
     <p><strong>Motif:</strong> ${details.titre}</p>
@@ -1001,15 +1003,18 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
 // Page d'approbation/refus de demande
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
-  
+
   console.log(`🔗 Accès page approbation demande ${id}, niveau ${niveau}`);
-  
+
   try {
+    // ✅ FIX MINIMAL: on joint leave_balances pour afficher solde congé dans l'interface
     const result = await pool.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
-              e.mail_responsable1, e.mail_responsable2
+              e.mail_responsable1, e.mail_responsable2,
+              COALESCE(lb.balance, 0.000) AS solde_conge
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
+       LEFT JOIN leave_balances lb ON lb.employee_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -1026,7 +1031,7 @@ app.get('/approuver-demande', async (req, res) => {
     }
 
     const demande = result.rows[0];
-    
+
     // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
@@ -1053,11 +1058,11 @@ app.get('/approuver-demande', async (req, res) => {
     // Noms des responsables
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
-    
+
     // Échapper les apostrophes dans les chaînes JavaScript
     const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
     const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
-    
+
     res.send(`
       <!DOCTYPE html>
       <html lang="fr">
@@ -1197,6 +1202,15 @@ app.get('/approuver-demande', async (req, res) => {
               <div class="info-label">Poste:</div>
               <div class="info-value">${demande.poste}</div>
             </div>
+
+            <!-- ✅ FIX MINIMAL: afficher le solde congé -->
+            ${demande.type_demande === 'conges' ? `
+            <div class="info-item">
+              <div class="info-label">Solde congé:</div>
+              <div class="info-value">${demande.solde_conge}</div>
+            </div>
+            ` : ''}
+
             <div class="info-item">
               <div class="info-label">Type de demande:</div>
               <div class="info-value">${typeDemandeLabel}</div>
@@ -1487,12 +1501,12 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         },
         resp1 ? resp1.fullName : 'le premier responsable'
       );
-      
-      return res.json({ 
-        success: true, 
-        message: 'Demande approuvée par le premier responsable, en attente du second' 
+
+      return res.json({
+        success: true,
+        message: 'Demande approuvée par le premier responsable, en attente du second'
       });
-    } 
+    }
 
     // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
     await pool.query(
@@ -1568,9 +1582,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     try {
       // Générer le PDF
       const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
-      
+
       const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().getTime()}.pdf`;
-      
+
       // Email simple avec PDF en pièce jointe
       await sendEmailWithRetry({
         from: {
@@ -1610,16 +1624,16 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       }, 'Notification RH - Demande approuvée (PDF)');
 
       console.log(`✅ PDF généré et envoyé à l'équipe RH: ${pdfFileName} (${pdfBuffer.length} octets)`);
-      
+
     } catch (pdfError) {
       console.error('❌ Erreur génération/envoi PDF:', pdfError);
       // En cas d'erreur, le processus continue quand même
     }
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Demande complètement approuvée et notifications envoyées' 
+
+    res.json({
+      success: true,
+      message: 'Demande complètement approuvée et notifications envoyées'
     });
   } catch (err) {
     console.error('❌ Erreur approbation demande:', err);
@@ -1656,7 +1670,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     }
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    
+
     // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
@@ -1706,10 +1720,10 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     }, 'Refus demande');
 
     console.log(`✅ Demande ${id} refusée`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Demande refusée avec succès' 
+
+    res.json({
+      success: true,
+      message: 'Demande refusée avec succès'
     });
   } catch (err) {
     console.error('❌ Erreur refus demande:', err);
@@ -1738,8 +1752,8 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
 
 // Route de santé
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'Serveur RH fonctionnel',
     timestamp: new Date().toISOString(),
     smtpPoolSize: emailPool.transporters.length,
@@ -1755,7 +1769,7 @@ app.get('/api/test-email', async (req, res) => {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'majed.messai@avocarbon.com',
+      to: 'rami.mejri@avocarbon.com',
       subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
       text: 'Ceci est un email de test pour vérifier la configuration SMTP.',
       html: `
@@ -1769,16 +1783,16 @@ app.get('/api/test-email', async (req, res) => {
     };
 
     const result = await sendEmailWithRetry(testMailOptions, 'Test SMTP');
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       message: 'Email de test envoyé avec succès',
       result: result
     });
   } catch (error) {
     console.error('❌ Erreur test email:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: error.message,
       details: error.originalError ? error.originalError.message : ''
     });
@@ -1788,7 +1802,7 @@ app.get('/api/test-email', async (req, res) => {
 // Route pour vérifier l'état des transporteurs SMTP
 app.get('/api/smtp-status', async (req, res) => {
   const statuses = [];
-  
+
   for (let i = 0; i < emailPool.transporters.length; i++) {
     const transporter = emailPool.transporters[i];
     try {
@@ -1807,7 +1821,7 @@ app.get('/api/smtp-status', async (req, res) => {
       });
     }
   }
-  
+
   res.json({
     poolSize: emailPool.transporters.length,
     currentIndex: emailPool.currentIndex,
@@ -1832,10 +1846,10 @@ app.listen(PORT, async () => {
   🔧 Test SMTP: http://localhost:${PORT}/api/test-email
   📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
   `);
-  
+
   // Vérifier la connexion SMTP au démarrage
   await verifySMTPConnection();
-  
+
   // Vérifier les templates Word
   try {
     await fs.access(TEMPLATE_TRAVAIL_PATH);
@@ -1843,7 +1857,7 @@ app.listen(PORT, async () => {
   } catch {
     console.warn('⚠️ Template attestation travail non trouvé');
   }
-  
+
   try {
     await fs.access(TEMPLATE_SALAIRE_PATH);
     console.log('✅ Template attestation salaire trouvé');
