@@ -92,7 +92,10 @@ function logEmailDetails(mailOptions, context, attempt = 1) {
   console.log(`   Sujet: ${mailOptions.subject}`);
   console.log(`   Pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.length : 0}`);
   console.log(
-    `   Taille pièces jointes: ${mailOptions.attachments ? mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0) : 0
+    `   Taille pièces jointes: ${
+      mailOptions.attachments
+        ? mailOptions.attachments.reduce((sum, att) => sum + (att.content?.length || 0), 0)
+        : 0
     } octets`
   );
 }
