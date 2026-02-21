@@ -389,6 +389,7 @@ async function genererAttestationSalaireWord(employe) {
     throw error;
   }
 }
+
 function calculerJoursOuvres(dateDebut, dateFin) {
   if (!dateDebut || !dateFin) return 0;
   
@@ -419,6 +420,7 @@ function calculerJoursOuvres(dateDebut, dateFin) {
   
   return joursOuvres;
 }
+
 // ==================== FONCTION DE GÉNÉRATION PDF POUR L'ÉQUIPE RH ====================
 
 /**
@@ -596,6 +598,7 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
     }
   });
 }
+
 // ==================== ROUTES API ====================
 
 // Récupérer tous les employés actifs (sans date de départ)
@@ -812,6 +815,9 @@ app.post('/api/demandes', async (req, res) => {
 
     const employe = employeResult.rows[0];
 
+    // ✅ MINIMAL CHANGE: garder l'id pour pouvoir lire leave_balances dans l'email responsable
+    employe.id = employe_id;
+
     // Convertir les chaînes vides en null pour les champs optionnels
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
@@ -888,6 +894,24 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   
   let typeLabel = details.type_demande === 'conges' ? 'Congé' : 
                   details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
+
+  // ✅ MINIMAL CHANGE: récupérer solde congé depuis leave_balances
+  let leaveBalanceValue = '0.000';
+  try {
+    const employeeId = employe?.id || employe?.employe_id || employe?.employee_id;
+    if (employeeId) {
+      const lb = await pool.query(
+        `SELECT balance FROM leave_balances WHERE employee_id = $1`,
+        [employeeId]
+      );
+      if (lb.rows.length > 0 && lb.rows[0].balance !== undefined && lb.rows[0].balance !== null) {
+        leaveBalanceValue = String(lb.rows[0].balance);
+      }
+    }
+  } catch (e) {
+    // On ne bloque pas l'envoi email si problème de lecture du solde
+    console.error('❌ Erreur récupération solde congé:', e.message);
+  }
   
   let detailsHtml = `
     <p><strong>Type:</strong> ${typeLabel}</p>
@@ -944,6 +968,9 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
         <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
           <p><strong>Poste:</strong> ${employe.poste}</p>
+
+          <!-- ✅ MINIMAL CHANGE: afficher le solde de congé -->
+          <p><strong>Solde de congé:</strong> ${leaveBalanceValue}</p>
         </div>
         <div style="margin: 20px 0;">
           ${detailsHtml}
@@ -1525,72 +1552,69 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       `
     }, 'Approbation finale - Email employé');
 
-// Dans la section "// 2. EMAIL À L'ÉQUIPE RH", remplacez par :
-
-// Calcul du nombre de jours ouvrés pour les congés
-let joursOuvres = 0;
-let infoJoursCongee = '';
-if (demande.type_demande === 'conges' && demande.date_retour) {
-  joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-  infoJoursCongee = `
+    // Calcul du nombre de jours ouvrés pour les congés
+    let joursOuvres = 0;
+    let infoJoursCongee = '';
+    if (demande.type_demande === 'conges' && demande.date_retour) {
+      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
+      infoJoursCongee = `
 <tr>
   <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
   <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
 </tr>`;
-}
+    }
 
-// 2. EMAIL À L'ÉQUIPE RH - Notification de la demande approuvée
-// 2. EMAIL À L'ÉQUIPE RH - Avec PDF en pièce jointe
-try {
-  // Générer le PDF
-  const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
-  
-  const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().getTime()}.pdf`;
-  
-  // Email simple avec PDF en pièce jointe
-  await sendEmailWithRetry({
-    from: {
-      name: 'Administration STS',
-      address: 'administration.STS@avocarbon.com'
-    },
-    to: 'nesria.ibrahim@avocarbon.com',
-    subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #1976d2; border-bottom: 3px solid #1976d2; padding-bottom: 10px;">
-          📋 Nouvelle demande RH approuvée
-        </h2>
-        <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #1976d2;">
-          <p style="margin: 0; color: #1565c0; font-weight: 500;">
-            ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.
-          </p>
-        </div>
-        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          <p><strong>Employé:</strong> ${demande.nom} ${demande.prenom}</p>
-          <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-          <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-          ${joursOuvres > 0 ? `<p><strong>Nombre de jours ouvrés:</strong> <span style="color: #1976d2; font-size: 18px; font-weight: bold;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</span></p>` : ''}
-        </div>
-        <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
-          📎 Veuillez consulter le fichier PDF joint pour tous les détails de la demande.
-        </p>
-      </div>
-    `,
-    attachments: [
-      {
-        filename: pdfFileName,
-        content: pdfBuffer,
-        contentType: 'application/pdf'
-      }
-    ]
-  }, 'Notification RH - Demande approuvée (PDF)');
+    // 2. EMAIL À L'ÉQUIPE RH - Avec PDF en pièce jointe
+    try {
+      // Générer le PDF
+      const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
+      
+      const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().getTime()}.pdf`;
+      
+      // Email simple avec PDF en pièce jointe
+      await sendEmailWithRetry({
+        from: {
+          name: 'Administration STS',
+          address: 'administration.STS@avocarbon.com'
+        },
+        to: 'nesria.ibrahim@avocarbon.com',
+        subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #1976d2; border-bottom: 3px solid #1976d2; padding-bottom: 10px;">
+              📋 Nouvelle demande RH approuvée
+            </h2>
+            <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #1976d2;">
+              <p style="margin: 0; color: #1565c0; font-weight: 500;">
+                ℹ️ Une demande RH vient d'être approuvée et nécessite votre attention pour le suivi administratif.
+              </p>
+            </div>
+            <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <p><strong>Employé:</strong> ${demande.nom} ${demande.prenom}</p>
+              <p><strong>Type de demande:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
+              <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
+              ${joursOuvres > 0 ? `<p><strong>Nombre de jours ouvrés:</strong> <span style="color: #1976d2; font-size: 18px; font-weight: bold;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</span></p>` : ''}
+            </div>
+            <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+              📎 Veuillez consulter le fichier PDF joint pour tous les détails de la demande.
+            </p>
+          </div>
+        `,
+        attachments: [
+          {
+            filename: pdfFileName,
+            content: pdfBuffer,
+            contentType: 'application/pdf'
+          }
+        ]
+      }, 'Notification RH - Demande approuvée (PDF)');
 
-  console.log(`✅ PDF généré et envoyé à l'équipe RH: ${pdfFileName} (${pdfBuffer.length} octets)`);
-  
-} catch (pdfError) {
-  console.error('❌ Erreur génération/envoi PDF:', pdfError);
-  // En cas d'erreur, le processus continue quand même
-}
+      console.log(`✅ PDF généré et envoyé à l'équipe RH: ${pdfFileName} (${pdfBuffer.length} octets)`);
+      
+    } catch (pdfError) {
+      console.error('❌ Erreur génération/envoi PDF:', pdfError);
+      // En cas d'erreur, le processus continue quand même
+    }
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
     
     res.json({ 
