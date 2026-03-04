@@ -275,8 +275,6 @@ async function optimizeAttachments(attachments) {
   if (!attachments || attachments.length === 0) return attachments;
 
   return attachments.map(attachment => {
-    // Si le contenu est un buffer et trop grand, on pourrait le compresser ici
-    // Pour l'instant, on se contente de vérifier la taille
     if (attachment.content && attachment.content.length > 5 * 1024 * 1024) {
       console.warn(`⚠️ Pièce jointe volumineuse: ${attachment.filename} (${Math.round(attachment.content.length / 1024 / 1024)}MB)`);
     }
@@ -289,7 +287,6 @@ async function optimizeAttachments(attachments) {
 // Fonction pour générer une attestation de travail Word
 async function genererAttestationTravailWord(employe) {
   try {
-    // Vérifier si le template existe
     try {
       await fs.access(TEMPLATE_TRAVAIL_PATH);
     } catch (error) {
@@ -297,13 +294,9 @@ async function genererAttestationTravailWord(employe) {
       throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
 
-    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_TRAVAIL_PATH);
-
-    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
 
-    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -314,7 +307,6 @@ async function genererAttestationTravailWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
 
-    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -327,7 +319,6 @@ async function genererAttestationTravailWord(employe) {
     });
 
     console.log(`✅ Attestation travail générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
-
     return reportBuffer;
 
   } catch (error) {
@@ -339,7 +330,6 @@ async function genererAttestationTravailWord(employe) {
 // Fonction pour générer une attestation de salaire Word
 async function genererAttestationSalaireWord(employe) {
   try {
-    // Vérifier si le template existe
     try {
       await fs.access(TEMPLATE_SALAIRE_PATH);
     } catch (error) {
@@ -347,10 +337,8 @@ async function genererAttestationSalaireWord(employe) {
       throw new Error('Template Word non trouvé. Placez-le dans le dossier templates/');
     }
 
-    // Lire le template Word
     const templateBuffer = await fs.readFile(TEMPLATE_SALAIRE_PATH);
 
-    // Formater le salaire
     const formaterSalaire = (salaire) => {
       if (!salaire) return '0,00';
       return parseFloat(salaire).toLocaleString('fr-TN', {
@@ -359,10 +347,8 @@ async function genererAttestationSalaireWord(employe) {
       }).replace(/,/g, ' ');
     };
 
-    // Générer la référence
     const reference = genererReference(employe.nom, employe.prenom);
 
-    // Données à injecter dans le template
     const data = {
       reference: reference,
       nom_complet: `${employe.nom} ${employe.prenom}`,
@@ -373,7 +359,6 @@ async function genererAttestationSalaireWord(employe) {
       date_actuelle: formatDateFR(new Date())
     };
 
-    // Générer le document Word
     const reportBuffer = await createReport({
       template: templateBuffer,
       data,
@@ -386,7 +371,6 @@ async function genererAttestationSalaireWord(employe) {
     });
 
     console.log(`✅ Attestation salaire générée pour ${employe.nom} ${employe.prenom} (${reportBuffer.length} octets)`);
-
     return reportBuffer;
 
   } catch (error) {
@@ -401,25 +385,19 @@ function calculerJoursOuvres(dateDebut, dateFin) {
   const debut = new Date(dateDebut);
   const fin = new Date(dateFin);
 
-  // Normaliser les heures pour éviter les problèmes de fuseau horaire
   debut.setHours(0, 0, 0, 0);
   fin.setHours(0, 0, 0, 0);
 
-  // Si la date de fin est avant la date de début
   if (fin < debut) return 0;
 
   let joursOuvres = 0;
   const dateActuelle = new Date(debut);
 
-  // Parcourir toutes les dates entre début et fin (inclus)
   while (dateActuelle <= fin) {
     const jourSemaine = dateActuelle.getDay();
-    // 0 = Dimanche, 6 = Samedi
-    // On compte seulement du lundi (1) au vendredi (5)
     if (jourSemaine >= 1 && jourSemaine <= 5) {
       joursOuvres++;
     }
-    // Passer au jour suivant
     dateActuelle.setDate(dateActuelle.getDate() + 1);
   }
 
@@ -428,9 +406,6 @@ function calculerJoursOuvres(dateDebut, dateFin) {
 
 // ==================== FONCTION DE GÉNÉRATION PDF POUR L'ÉQUIPE RH ====================
 
-/**
- * Génère un PDF avec les détails de la demande RH approuvée
- */
 async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
   return new Promise((resolve, reject) => {
     try {
@@ -444,7 +419,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      // En-tête avec couleur
       doc.rect(0, 0, doc.page.width, 80).fill('#1976d2');
 
       doc.fillColor('#ffffff')
@@ -452,10 +426,8 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
         .font('Helvetica-Bold')
         .text('Demande RH Approuvée', 50, 30, { align: 'center' });
 
-      // Réinitialiser la couleur
       doc.fillColor('#000000');
 
-      // Alerte importante
       doc.rect(50, 100, doc.page.width - 100, 60)
         .fillAndStroke('#e3f2fd', '#1976d2');
 
@@ -470,7 +442,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       let yPosition = 180;
 
-      // Section Informations Employé
       doc.fontSize(16)
         .font('Helvetica-Bold')
         .fillColor('#1976d2')
@@ -499,7 +470,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       yPosition += 15;
 
-      // Section Détails de la Demande
       doc.fontSize(16)
         .font('Helvetica-Bold')
         .fillColor('#1976d2')
@@ -556,7 +526,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
 
       doc.fillColor('#000000').font('Helvetica');
       demandeInfo.forEach(info => {
-        // Vérifier si on dépasse la page
         if (yPosition > doc.page.height - 100) {
           doc.addPage();
           yPosition = 50;
@@ -580,7 +549,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
         yPosition += 25;
       });
 
-      // Pied de page
       const footerY = doc.page.height - 60;
       doc.rect(0, footerY, doc.page.width, 60).fill('#f5f5f5');
       doc.fillColor('#666666')
@@ -630,7 +598,6 @@ app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
   try {
-    // Validation
     if (!employe_id || !type_document) {
       return res.status(400).json({
         error: 'Les champs employé et type de document sont obligatoires'
@@ -639,7 +606,6 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
 
-    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
@@ -656,26 +622,22 @@ app.post('/api/generer-attestation', async (req, res) => {
     let fileName;
     let documentTypeLabel;
 
-    // Générer le document Word selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de salaire';
 
-      // Vérifier si le salaire existe
       if (!employe.salaire_brute) {
         return res.status(400).json({
           error: 'Salaire non disponible pour cet employé'
         });
       }
     } else {
-      // Par défaut, attestation de travail
       wordBuffer = await genererAttestationTravailWord(employe);
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
       documentTypeLabel = 'Attestation de travail';
     }
 
-    // Optimiser les pièces jointes
     const optimizedAttachments = await optimizeAttachments([
       {
         filename: fileName,
@@ -684,7 +646,6 @@ app.post('/api/generer-attestation', async (req, res) => {
       }
     ]);
 
-    // Préparer l'email
     const mailOptions = {
       from: {
         name: 'Administration STS',
@@ -714,7 +675,6 @@ app.post('/api/generer-attestation', async (req, res) => {
       attachments: optimizedAttachments
     };
 
-    // Envoyer l'email avec retry
     const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
 
     res.json({
@@ -758,7 +718,6 @@ app.post('/api/telecharger-attestation', async (req, res) => {
     let wordBuffer;
     let fileName;
 
-    // Générer le document selon le type
     if (type_document === 'attestation_salaire') {
       wordBuffer = await genererAttestationSalaireWord(employe);
       fileName = `Attestation_Salaire_${employe.nom}_${employe.prenom}.docx`;
@@ -767,7 +726,6 @@ app.post('/api/telecharger-attestation', async (req, res) => {
       fileName = `Attestation_Travail_${employe.nom}_${employe.prenom}.docx`;
     }
 
-    // Envoyer le fichier Word en téléchargement
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', wordBuffer.length);
@@ -798,7 +756,6 @@ app.post('/api/demandes', async (req, res) => {
   } = req.body;
 
   try {
-    // Validation des champs obligatoires
     if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({
         error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires'
@@ -807,7 +764,6 @@ app.post('/api/demandes', async (req, res) => {
 
     console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
 
-    // Récupérer les informations de l'employé
     const employeResult = await pool.query(
       `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
@@ -819,11 +775,8 @@ app.post('/api/demandes', async (req, res) => {
     }
 
     const employe = employeResult.rows[0];
+    employe.id = employe_id; // ✅ Set employee ID for leave balance lookup
 
-    // ✅ MINIMAL CHANGE: garder l'id pour pouvoir lire leave_balances dans l'email responsable
-    employe.id = employe_id;
-
-    // Convertir les chaînes vides en null pour les champs optionnels
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
     const heureRetourFinal = heure_retour && heure_retour !== '' ? heure_retour : null;
@@ -831,7 +784,6 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
-    // Insérer la demande
     const insertResult = await pool.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
@@ -857,7 +809,6 @@ app.post('/api/demandes', async (req, res) => {
     const demandeId = insertResult.rows[0].id;
     console.log(`✅ Demande créée avec ID: ${demandeId}`);
 
-    // Envoyer email au responsable 1
     if (employe.mail_responsable1) {
       await envoyerEmailResponsable(
         employe,
@@ -892,7 +843,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-// Fonction pour envoyer email au responsable (MODIFIÉE)
+// Fonction pour envoyer email au responsable
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -900,7 +851,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   let typeLabel = details.type_demande === 'conges' ? 'Congé' :
     details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
 
-  // ✅ MINIMAL CHANGE: récupérer solde congé depuis leave_balances
+  // Récupérer solde congé depuis leave_balances
   let leaveBalanceValue = '0.000';
   try {
     const employeeId = employe?.id || employe?.employe_id || employe?.employee_id;
@@ -914,7 +865,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       }
     }
   } catch (e) {
-    // On ne bloque pas l'envoi email si problème de lecture du solde
     console.error('❌ Erreur récupération solde congé:', e.message);
   }
 
@@ -945,7 +895,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     `;
   }
 
-  // Si c'est pour le deuxième responsable après approbation du premier
   let infoPremierApprobation = '';
   if (premierResponsable && niveau === 2) {
     infoPremierApprobation = `
@@ -973,8 +922,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
         <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <p><strong>Employé:</strong> ${employe.nom} ${employe.prenom}</p>
           <p><strong>Poste:</strong> ${employe.poste}</p>
-
-          <!-- ✅ MINIMAL CHANGE: afficher le solde de congé -->
           <p><strong>Solde de congé:</strong> ${leaveBalanceValue}</p>
         </div>
         <div style="margin: 20px 0;">
@@ -999,7 +946,6 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
   } catch (error) {
     console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
-    // Ne pas propager l'erreur pour ne pas bloquer la création de la demande
   }
 }
 
@@ -1010,7 +956,6 @@ app.get('/approuver-demande', async (req, res) => {
   console.log(`🔗 Accès page approbation demande ${id}, niveau ${niveau}`);
 
   try {
-    // ✅ FIX MINIMAL: on joint leave_balances pour afficher solde congé dans l'interface
     const result = await pool.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
               e.mail_responsable1, e.mail_responsable2,
@@ -1035,7 +980,6 @@ app.get('/approuver-demande', async (req, res) => {
 
     const demande = result.rows[0];
 
-    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.send(`
@@ -1058,11 +1002,9 @@ app.get('/approuver-demande', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // Noms des responsables
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
-    // Échapper les apostrophes dans les chaînes JavaScript
     const jsSafeTitre = demande.titre.replace(/'/g, "\\'");
     const jsSafeTypeCongeLabel = typeCongeLabel ? typeCongeLabel.replace(/'/g, "\\'") : '';
 
@@ -1206,7 +1148,6 @@ app.get('/approuver-demande', async (req, res) => {
               <div class="info-value">${demande.poste}</div>
             </div>
 
-            <!-- ✅ FIX MINIMAL: afficher le solde congé -->
             ${demande.type_demande === 'conges' ? `
             <div class="info-item">
               <div class="info-label">Solde congé:</div>
@@ -1270,7 +1211,6 @@ app.get('/approuver-demande', async (req, res) => {
         </div>
 
         <script>
-          // Déclaration des variables globales
           const demandeId = ${id};
           const niveau = ${Number(niveau) || 1};
           
@@ -1382,7 +1322,6 @@ app.get('/approuver-demande', async (req, res) => {
             }
           }
 
-          // Initialisation des événements
           document.addEventListener('DOMContentLoaded', function() {
             const approveBtn = document.getElementById('approveBtn');
             const rejectBtn = document.getElementById('rejectBtn');
@@ -1417,9 +1356,9 @@ app.get('/approuver-demande', async (req, res) => {
   }
 });
 
-// ==================== MODIFICATION DE LA ROUTE D'APPROBATION ====================
+// ==================== ROUTE D'APPROBATION ====================
 
-// Approuver une demande (VERSION MODIFIÉE)
+// Approuver une demande
 app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { id } = req.params;
   const { niveau } = req.body;
@@ -1441,7 +1380,9 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
-    // Vérifier si la demande est déjà traitée
+    // ✅ FIX: set .id to the employee ID (not the demande ID) for leave balance lookup
+    demande.id = demande.employe_id;
+
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1449,19 +1390,16 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mettre à jour l'approbation (R1 ou R2) à TRUE
     await pool.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
 
-    // Noms des responsables à partir de leurs emails
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
     // CAS 1 : Niveau 1 & responsable 2 existe → mail étape 1 + mail à R2
     if (niveau == 1 && demande.mail_responsable2) {
-      // Email à l'employé : approuvé par R1, en attente de R2
       await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
@@ -1484,7 +1422,6 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         `
       }, 'Approbation niveau 1');
 
-      // Email au responsable 2 avec mention du premier approbateur
       await envoyerEmailResponsable(
         demande,
         demande.mail_responsable2,
@@ -1517,19 +1454,16 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       [id]
     );
 
-    // Qui est l'approbateur final ?
     let approuveur = null;
     if (niveau == 1 && !demande.mail_responsable2) {
-      approuveur = resp1; // seul responsable
+      approuveur = resp1;
     } else if (niveau == 2) {
-      approuveur = resp2; // deuxième approbation
+      approuveur = resp2;
     }
 
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
-
-    // ==================== NOUVEAUX EMAILS D'APPROBATION FINALE ====================
 
     // 1. EMAIL À L'EMPLOYÉ - Confirmation d'approbation
     await sendEmailWithRetry({
@@ -1571,24 +1505,15 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     // Calcul du nombre de jours ouvrés pour les congés
     let joursOuvres = 0;
-    let infoJoursCongee = '';
     if (demande.type_demande === 'conges' && demande.date_retour) {
       joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-      infoJoursCongee = `
-<tr>
-  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #555;">Nombre de jours ouvrés:</td>
-  <td style="padding: 10px; border-bottom: 1px solid #e0e0e0; color: #333;"><strong style="color: #1976d2; font-size: 18px;">${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></td>
-</tr>`;
     }
 
     // 2. EMAIL À L'ÉQUIPE RH - Avec PDF en pièce jointe
     try {
-      // Générer le PDF
       const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
-
       const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().getTime()}.pdf`;
 
-      // Email simple avec PDF en pièce jointe
       await sendEmailWithRetry({
         from: {
           name: 'Administration STS',
@@ -1630,8 +1555,8 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     } catch (pdfError) {
       console.error('❌ Erreur génération/envoi PDF:', pdfError);
-      // En cas d'erreur, le processus continue quand même
     }
+
     console.log(`✅ Demande ${id} complètement approuvée - Emails envoyés à l'employé et à l'équipe RH`);
 
     res.json({
@@ -1666,7 +1591,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const demande = demandeResult.rows[0];
 
-    // Vérifier si la demande est déjà traitée
     if (demande.statut !== 'en_attente') {
       console.log(`ℹ️ Demande ${id} déjà traitée: ${demande.statut}`);
       return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
@@ -1674,7 +1598,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    // Mise à jour statut + commentaire + champ approuve_responsable à FALSE
     await pool.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', 
@@ -1685,7 +1608,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       [commentaire, id]
     );
 
-    // Identité du responsable qui refuse
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
@@ -1700,7 +1622,6 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre)
       : null;
 
-    // Email à l'employé
     await sendEmailWithRetry({
       from: {
         name: 'Administration STS',
@@ -1753,7 +1674,6 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
 
 // ==================== ROUTES DE DIAGNOSTIC ====================
 
-// Route de santé
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -1764,7 +1684,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Route pour tester la configuration SMTP
 app.get('/api/test-email', async (req, res) => {
   try {
     const testMailOptions = {
@@ -1802,7 +1721,6 @@ app.get('/api/test-email', async (req, res) => {
   }
 });
 
-// Route pour vérifier l'état des transporteurs SMTP
 app.get('/api/smtp-status', async (req, res) => {
   const statuses = [];
 
@@ -1850,10 +1768,8 @@ app.listen(PORT, async () => {
   📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
   `);
 
-  // Vérifier la connexion SMTP au démarrage
   await verifySMTPConnection();
 
-  // Vérifier les templates Word
   try {
     await fs.access(TEMPLATE_TRAVAIL_PATH);
     console.log('✅ Template attestation travail trouvé');
