@@ -912,7 +912,8 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       address: 'administration.STS@avocarbon.com'
     },
     to: emailResponsable,
-    subject: `${niveau === 2 && premierResponsable ? '✓ ' : ''}Nouvelle demande RH - ${employe.nom} ${employe.prenom}`,
+    // ✅ MODIFICATION : ajout du type de demande dans l'objet de l'email
+    subject: `${niveau === 2 && premierResponsable ? '✓ ' : ''}Nouvelle demande RH [${typeLabel}] - ${employe.nom} ${employe.prenom}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
