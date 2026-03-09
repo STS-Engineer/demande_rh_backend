@@ -12,11 +12,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configuration PostgreSQL
-const pool = new Pool({
+// ==================== DATABASE CONFIGURATION ====================
+
+// HR Database (for employees, demandes_rh, etc.)
+const poolHR = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
   database: process.env.DB_NAME || 'rh_application',
+  password: process.env.DB_PASS || 'St$@0987',
+  port: process.env.DB_PORT || 5432,
+  ssl: { rejectUnauthorized: false }
+});
+
+// Attendance Database (same server, different database name)
+const poolAttendance = new Pool({
+  user: process.env.DB_USER || 'administrationSTS',
+  host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
+  database: 'attendance',  // Just the database name is different
   password: process.env.DB_PASS || 'St$@0987',
   port: process.env.DB_PORT || 5432,
   ssl: { rejectUnauthorized: false }
@@ -572,12 +584,293 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
   });
 }
 
+// ==================== ATTENDANCE REPORT SYSTEM ====================
+
+async function sendAttendanceReport() {
+  try {
+    const today = new Date();
+    const day = today.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+
+    // Skip weekends
+    if (day === 0 || day === 6) {
+      console.log("Weekend - no attendance report");
+      return;
+    }
+
+    const todayStr = today.toISOString().split('T')[0];
+
+    let startDate;
+    let endDate;
+
+    // Calculate date range
+    if (day === 1) { // Monday
+      const lastMonday = new Date(today);
+      lastMonday.setDate(today.getDate() - 7);
+      const lastFriday = new Date(today);
+      lastFriday.setDate(today.getDate() - 3);
+      startDate = lastMonday.toISOString().split('T')[0];
+      endDate = lastFriday.toISOString().split('T')[0];
+    } else { // Tuesday to Friday
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - (day - 1));
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      startDate = monday.toISOString().split('T')[0];
+      endDate = yesterday.toISOString().split('T')[0];
+    }
+
+    console.log(`📊 Attendance report range: ${startDate} -> ${endDate}`);
+
+    // Get today's arrivals from attendance database
+    const arrivals = await poolAttendance.query(`
+      SELECT full_name, arrival_time
+      FROM attendance_daily
+      WHERE work_date = $1
+      ORDER BY arrival_time
+    `, [todayStr]);
+
+    // Get weekly data from attendance database
+    const weekData = await poolAttendance.query(`
+      SELECT full_name, work_date, arrival_time, departure_time
+      FROM attendance_daily
+      WHERE work_date BETWEEN $1 AND $2
+      ORDER BY work_date, full_name
+    `, [startDate, endDate]);
+
+    // Group weekly data by date
+    const groupedByDate = {};
+    weekData.rows.forEach(row => {
+      if (!groupedByDate[row.work_date]) {
+        groupedByDate[row.work_date] = [];
+      }
+      groupedByDate[row.work_date].push(row);
+    });
+
+    // Calculate statistics
+    const totalPresentToday = arrivals.rows.length;
+    const totalPresentWeek = weekData.rows.length;
+    const uniqueEmployeesWeek = new Set(weekData.rows.map(r => r.full_name)).size;
+
+    // Build HTML for arrivals
+    const arrivalsHTML = arrivals.rows.map(r => `
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #ddd;">${r.full_name}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: center;">${r.arrival_time || 'Not arrived'}</td>
+      </tr>
+    `).join('');
+
+    // Build HTML for weekly data
+    let weekHTML = '';
+    for (const [date, records] of Object.entries(groupedByDate)) {
+      weekHTML += `
+        <tr>
+          <td colspan="3" style="background-color: #e2e8f0; padding: 10px; font-weight: bold; color: #1e40af;">
+            📅 ${formatDateFR(date)}
+          </td>
+        </tr>
+      `;
+      records.forEach(r => {
+        weekHTML += `
+          <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">${r.full_name}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${r.arrival_time || 'N/A'}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${r.departure_time || 'N/A'}</td>
+          </tr>
+        `;
+      });
+    }
+
+    // Send email
+    const mailOptions = {
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: 'fethi.chaouachi@avocarbon.com', // Manager's email
+      subject: `📊 Rapport de Présence - ${formatDateFR(today)}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 900px; margin: 0 auto; background: #ffffff; }
+            .header { 
+              background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+              color: white; 
+              padding: 25px; 
+              border-radius: 10px 10px 0 0;
+            }
+            .stats-grid { 
+              display: grid; 
+              grid-template-columns: repeat(3, 1fr); 
+              gap: 20px; 
+              margin: 25px 0;
+            }
+            .stat-card { 
+              background: #f8fafc; 
+              padding: 20px; 
+              border-radius: 10px; 
+              text-align: center;
+              border: 1px solid #e2e8f0;
+            }
+            .stat-number { 
+              font-size: 32px; 
+              font-weight: bold; 
+              color: #2563eb; 
+            }
+            .section-title {
+              color: #1e293b;
+              font-size: 20px;
+              font-weight: 600;
+              margin: 30px 0 15px;
+              padding-bottom: 8px;
+              border-bottom: 3px solid #2563eb;
+            }
+            table { 
+              width: 100%; 
+              border-collapse: collapse; 
+              margin: 15px 0;
+              background: white;
+              border-radius: 8px;
+              overflow: hidden;
+              box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            th { 
+              background-color: #2563eb; 
+              color: white; 
+              padding: 12px; 
+              text-align: left;
+            }
+            td { padding: 10px; border-bottom: 1px solid #e2e8f0; }
+            .footer { 
+              margin-top: 30px; 
+              padding: 20px; 
+              border-top: 2px solid #e2e8f0; 
+              font-size: 13px; 
+              color: #64748b; 
+              text-align: center;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1 style="margin:0;">📊 Rapport de Présence</h1>
+              <p style="margin:5px 0 0; opacity:0.9;">Période: ${formatDateFR(startDate)} → ${formatDateFR(endDate)}</p>
+            </div>
+
+            <div class="stats-grid">
+              <div class="stat-card">
+                <div class="stat-number">${totalPresentToday}</div>
+                <div style="color: #475569;">Présents aujourd'hui</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-number">${totalPresentWeek}</div>
+                <div style="color: #475569;">Total présences semaine</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-number">${uniqueEmployeesWeek}</div>
+                <div style="color: #475569;">Employés distincts</div>
+              </div>
+            </div>
+
+            <div class="section-title">
+              ✅ Arrivées Aujourd'hui (${formatDateFR(todayStr)})
+            </div>
+            
+            ${arrivals.rows.length > 0 ? `
+            <table>
+              <thead>
+                <tr>
+                  <th>Employé</th>
+                  <th style="text-align: center;">Heure d'arrivée</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${arrivalsHTML}
+              </tbody>
+            </table>
+            ` : `
+            <div style="background: #fef9c3; color: #854d0e; padding: 15px; border-radius: 8px;">
+              ⚠️ Aucune arrivée enregistrée aujourd'hui
+            </div>
+            `}
+
+            <div class="section-title">
+              📅 Résumé Hebdomadaire
+            </div>
+
+            ${weekData.rows.length > 0 ? `
+            <table>
+              <thead>
+                <tr>
+                  <th>Employé</th>
+                  <th style="text-align: center;">Arrivée</th>
+                  <th style="text-align: center;">Départ</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${weekHTML}
+              </tbody>
+            </table>
+            
+            <div style="background: #e8f4fd; padding: 15px; border-radius: 8px; margin-top: 15px;">
+              <p style="margin:0; color: #1e40af;">
+                <strong>📊 Statistiques détaillées:</strong><br>
+                • Total des présences: ${totalPresentWeek}<br>
+                • Moyenne journalière: ${Math.round(totalPresentWeek / Object.keys(groupedByDate).length || 1)} employés<br>
+                • Jours avec données: ${Object.keys(groupedByDate).length} jour(s)<br>
+                • Employés ayant pointé: ${uniqueEmployeesWeek}
+              </p>
+            </div>
+            ` : `
+            <div style="background: #fef9c3; color: #854d0e; padding: 15px; border-radius: 8px;">
+              ⚠️ Aucune donnée de présence pour cette période
+            </div>
+            `}
+
+            <div class="footer">
+              <p>📧 Rapport généré automatiquement depuis la base de données "attendance"</p>
+              <p>📅 ${formatDateFR(today)} à ${today.toLocaleTimeString('fr-FR')}</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+
+    await sendEmailWithRetry(mailOptions, "Attendance report");
+    console.log("✅ Attendance report sent successfully");
+
+  } catch (error) {
+    console.error("❌ Attendance report error:", error);
+  }
+}
+
+// Manual trigger endpoint for attendance report
+app.post('/api/attendance/send-report', async (req, res) => {
+  try {
+    await sendAttendanceReport();
+    res.json({
+      success: true,
+      message: "Attendance report sent successfully"
+    });
+  } catch (error) {
+    console.error("Error in manual attendance report:", error);
+    res.status(500).json({
+      error: "Error sending attendance report",
+      details: error.message
+    });
+  }
+});
+
 // ==================== ROUTES API ====================
 
 // Récupérer tous les employés actifs (sans date de départ)
 app.get('/api/employees/actifs', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await poolHR.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
               mail_responsable1, mail_responsable2, date_debut,
               date_naissance, cin, salaire_brute
@@ -606,7 +899,7 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     console.log(`📄 Génération attestation pour employé ${employe_id}, type: ${type_document}`);
 
-    const employeResult = await pool.query(
+    const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
        FROM employees WHERE id = $1`,
@@ -704,7 +997,7 @@ app.post('/api/telecharger-attestation', async (req, res) => {
 
     console.log(`📥 Téléchargement attestation pour employé ${employe_id}, type: ${type_document}`);
 
-    const employeResult = await pool.query(
+    const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
        FROM employees WHERE id = $1`,
       [employe_id]
@@ -764,7 +1057,7 @@ app.post('/api/demandes', async (req, res) => {
 
     console.log(`📋 Création demande ${type_demande} pour employé ${employe_id}: ${titre}`);
 
-    const employeResult = await pool.query(
+    const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
        FROM employees WHERE id = $1`,
       [employe_id]
@@ -784,7 +1077,7 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
 
-    const insertResult = await pool.query(
+    const insertResult = await poolHR.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
         heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
@@ -856,7 +1149,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   try {
     const employeeId = employe?.id || employe?.employe_id || employe?.employee_id;
     if (employeeId) {
-      const lb = await pool.query(
+      const lb = await poolHR.query(
         `SELECT balance FROM leave_balances WHERE employee_id = $1`,
         [employeeId]
       );
@@ -957,7 +1250,7 @@ app.get('/approuver-demande', async (req, res) => {
   console.log(`🔗 Accès page approbation demande ${id}, niveau ${niveau}`);
 
   try {
-    const result = await pool.query(
+    const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
               e.mail_responsable1, e.mail_responsable2,
               COALESCE(lb.balance, 0.000) AS solde_conge
@@ -1367,7 +1660,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   console.log(`✅ Approbation demande ${id}, niveau ${niveau}`);
 
   try {
-    const demandeResult = await pool.query(
+    const demandeResult = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
@@ -1391,7 +1684,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    await pool.query(
+    await poolHR.query(
       `UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
       [id]
     );
@@ -1450,7 +1743,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     }
 
     // CAS 2 : Demande complètement approuvée (pas de R2 ou validation niveau 2)
-    await pool.query(
+    await poolHR.query(
       `UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`,
       [id]
     );
@@ -1578,7 +1871,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
   console.log(`❌ Refus demande ${id}, niveau ${niveau}`);
 
   try {
-    const demandeResult = await pool.query(
+    const demandeResult = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
        FROM demande_rh d
        JOIN employees e ON d.employe_id = e.id
@@ -1599,7 +1892,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
 
-    await pool.query(
+    await poolHR.query(
       `UPDATE demande_rh 
        SET statut = 'refuse', 
            commentaire_refus = $1, 
@@ -1659,7 +1952,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 // Récupérer les demandes d'un employé
 app.get('/api/demandes/employe/:id', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await poolHR.query(
       `SELECT * FROM demande_rh 
        WHERE employe_id = $1 
        ORDER BY created_at DESC`,
@@ -1752,6 +2045,27 @@ app.get('/api/smtp-status', async (req, res) => {
   });
 });
 
+// ==================== CRON JOB FOR AUTOMATIC ATTENDANCE REPORTS ====================
+
+// Schedule automatic reports (Mon-Fri at 9 AM Tunisia time)
+try {
+  const cron = require('node-cron');
+  
+  // Schedule the job
+  cron.schedule('0 9 * * 1-5', async () => {
+    console.log("⏰ Running automatic attendance report...");
+    await sendAttendanceReport();
+  }, {
+    timezone: "Africa/Tunis"
+  });
+  
+  console.log("✅ Attendance reports scheduled for weekdays at 9:00 AM Tunisia time");
+  
+} catch (error) {
+  console.warn("⚠️ Cron scheduling not available. To enable automatic reports, run: npm install node-cron");
+  console.warn("Error details:", error.message);
+}
+
 // ==================== DÉMARRAGE DU SERVEUR ====================
 
 const PORT = process.env.PORT || 5000;
@@ -1764,6 +2078,7 @@ app.listen(PORT, async () => {
   👥 API Employés: http://localhost:${PORT}/api/employees/actifs
   📋 API Demandes: http://localhost:${PORT}/api/demandes
   📄 API Attestations: http://localhost:${PORT}/api/generer-attestation
+  📊 API Rapport Présence: http://localhost:${PORT}/api/attendance/send-report
   🩺 Santé: http://localhost:${PORT}/health
   🔧 Test SMTP: http://localhost:${PORT}/api/test-email
   📊 Status SMTP: http://localhost:${PORT}/api/smtp-status
