@@ -587,7 +587,7 @@ async function sendAttendanceReport() {
         address: 'administration.STS@avocarbon.com'
       },
       to: 'rami.mejri@avocarbon.com',
-      subject: `📊 Rapport de Présence — ${formatDateFR(today)}`,
+      subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
         <html lang="fr">
@@ -596,7 +596,7 @@ async function sendAttendanceReport() {
         </head>
         <body style="margin:0; padding:30px 20px; background:#f4f4f4; font-family: Arial, sans-serif;">
 
-          <div style="max-width:640px; margin:0 auto; background:#ffffff; border:1px solid #ddd; border-radius:6px; overflow:hidden;">
+          <div style="width:100%; background:#ffffff; border:1px solid #ddd; border-radius:6px; overflow:hidden;">
 
             <!-- HEADER -->
             <div style="background:#2d4a6e; padding:24px 32px;">
@@ -1433,7 +1433,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('30 11 * * 1-5', async () => {
+  cron.schedule('30 12 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance report...");
     await sendAttendanceReport();
   }, { timezone: "Africa/Tunis" });
