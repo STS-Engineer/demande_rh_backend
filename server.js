@@ -686,7 +686,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'fethi.chaouachi@avocarbon.com', // Manager's email
+      to: ['fethi.chaouachi@avocarbon.com','rami.mejri@avocarbon.com'], // Manager's email
       subject: `📊 Rapport de Présence - ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
