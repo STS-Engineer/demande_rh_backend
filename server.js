@@ -686,7 +686,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'rami.mejri@avocarbon.com', // Manager's email
+      to: ['fethi.chaouachi@avocarbon.com', 'rami.mejri@avocarbon.com' ], // Manager's email
       subject: `📊 Rapport de Présence - ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -2052,7 +2052,7 @@ try {
   const cron = require('node-cron');
   
   // Schedule the job
-  cron.schedule('15 9 * * 1-5', async () => {
+  cron.schedule('0 9 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance report...");
     await sendAttendanceReport();
   }, {
