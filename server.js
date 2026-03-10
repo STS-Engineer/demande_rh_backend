@@ -1433,7 +1433,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('30 12 * * 1-5', async () => {
+  cron.schedule('57 12 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance report...");
     await sendAttendanceReport();
   }, { timezone: "Africa/Tunis" });
