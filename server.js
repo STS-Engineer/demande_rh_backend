@@ -542,10 +542,13 @@ async function sendAttendanceReport() {
     // Statistics
     const totalPresentToday = arrivals.rows.length;
     const totalPresentWeek = weekData.rows.length;
-    const uniqueEmployeesWeek = new Set(weekData.rows.map(r => r.full_name)).size;
     const avgPerDay = Object.keys(groupedByDate).length > 0
       ? Math.round(totalPresentWeek / Object.keys(groupedByDate).length)
       : 0;
+
+    // ✅ Get real total employee count from DB — not from attendance data
+    const totalEmployeesResult = await poolAttendance.query(`SELECT COUNT(*) as total FROM employees`);
+    const totalEmployees = parseInt(totalEmployeesResult.rows[0].total);
 
     // Build today's arrivals rows
     const arrivalsRows = arrivals.rows.map((r, i) => `
@@ -619,8 +622,8 @@ async function sendAttendanceReport() {
                 <div style="font-size:12px; color:#6b7280; margin-top:3px;">Présences cette semaine</div>
               </div>
               <div style="flex:1; padding:20px; text-align:center;">
-                <div style="font-size:32px; font-weight:700; color:#1e293b;">${uniqueEmployeesWeek}</div>
-                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Employés distincts</div>
+                <div style="font-size:32px; font-weight:700; color:#1e293b;">${totalEmployees}</div>
+                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Total employés</div>
               </div>
             </div>
 
@@ -674,7 +677,7 @@ async function sendAttendanceReport() {
                 Total présences : <strong>${totalPresentWeek}</strong> &nbsp;•&nbsp;
                 Moyenne/jour : <strong>${avgPerDay} employés</strong> &nbsp;•&nbsp;
                 Jours avec données : <strong>${Object.keys(groupedByDate).length}</strong> &nbsp;•&nbsp;
-                Employés distincts : <strong>${uniqueEmployeesWeek}</strong>
+                Total employés : <strong>${totalEmployees}</strong>
               </div>
               ` : `
               <div style="background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:14px 18px; border-radius:6px; font-size:13px;">
@@ -1433,7 +1436,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('57 12 * * 1-5', async () => {
+  cron.schedule('22 13 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance report...");
     await sendAttendanceReport();
   }, { timezone: "Africa/Tunis" });
