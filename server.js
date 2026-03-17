@@ -240,10 +240,8 @@ const acquireJobLock = async (lockId) => {
   const instanceId = process.env.WEBSITE_INSTANCE_ID || `instance_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
   try {
-    // Convert lockId string to a consistent integer hash
     const lockHash = Math.abs(lockId.split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0));
 
-    // Try to acquire PostgreSQL advisory lock (non-blocking)
     const result = await poolHR.query('SELECT pg_try_advisory_lock($1) as acquired', [lockHash]);
 
     if (result.rows[0].acquired) {
@@ -479,7 +477,6 @@ async function sendAttendanceReport() {
   const lockId = 'attendance_report_job';
   const lock = await acquireJobLock(lockId);
 
-  // ✅ If another Azure instance already has the lock, skip immediately
   if (!lock.acquired) {
     console.log(`⏭️ [Attendance Report] Skipping — lock held by another instance`);
     return;
@@ -487,7 +484,7 @@ async function sendAttendanceReport() {
 
   try {
     const today = new Date();
-    const day = today.getDay(); // 0=Sun, 6=Sat
+    const day = today.getDay();
 
     if (day === 0 || day === 6) {
       console.log("Weekend - no attendance report");
@@ -498,14 +495,14 @@ async function sendAttendanceReport() {
 
     let startDate, endDate;
 
-    if (day === 1) { // Monday → report last week
+    if (day === 1) {
       const lastMonday = new Date(today);
       lastMonday.setDate(today.getDate() - 7);
       const lastFriday = new Date(today);
       lastFriday.setDate(today.getDate() - 3);
       startDate = lastMonday.toISOString().split('T')[0];
       endDate = lastFriday.toISOString().split('T')[0];
-    } else { // Tuesday–Friday → report from Monday to yesterday
+    } else {
       const monday = new Date(today);
       monday.setDate(today.getDate() - (day - 1));
       const yesterday = new Date(today);
@@ -516,7 +513,6 @@ async function sendAttendanceReport() {
 
     console.log(`📊 Attendance report range: ${startDate} -> ${endDate}`);
 
-    // Get today's arrivals
     const arrivals = await poolAttendance.query(`
       SELECT full_name, arrival_time
       FROM attendance_daily
@@ -524,7 +520,6 @@ async function sendAttendanceReport() {
       ORDER BY arrival_time
     `, [todayStr]);
 
-    // Get weekly data
     const weekData = await poolAttendance.query(`
       SELECT full_name, work_date, arrival_time, departure_time
       FROM attendance_daily
@@ -532,25 +527,21 @@ async function sendAttendanceReport() {
       ORDER BY work_date, full_name
     `, [startDate, endDate]);
 
-    // Group weekly data by date
     const groupedByDate = {};
     weekData.rows.forEach(row => {
       if (!groupedByDate[row.work_date]) groupedByDate[row.work_date] = [];
       groupedByDate[row.work_date].push(row);
     });
 
-    // Statistics
     const totalPresentToday = arrivals.rows.length;
     const totalPresentWeek = weekData.rows.length;
     const avgPerDay = Object.keys(groupedByDate).length > 0
       ? Math.round(totalPresentWeek / Object.keys(groupedByDate).length)
       : 0;
 
-    // ✅ Get real total employee count from DB — not from attendance data
     const totalEmployeesResult = await poolAttendance.query(`SELECT COUNT(*) as total FROM employees`);
     const totalEmployees = parseInt(totalEmployeesResult.rows[0].total);
 
-    // Build today's arrivals rows
     const arrivalsRows = arrivals.rows.map((r, i) => `
       <tr style="border-bottom:1px solid #f3f4f6; ${i % 2 !== 0 ? 'background:#fafafa;' : ''}">
         <td style="padding:10px 10px; color:#374151; font-size:14px;">${r.full_name}</td>
@@ -558,11 +549,9 @@ async function sendAttendanceReport() {
       </tr>
     `).join('');
 
-    // Build weekly rows grouped by date
     let weekRows = '';
     let rowIndex = 0;
     for (const [date, records] of Object.entries(groupedByDate)) {
-      // Format day name
       const dateObj = new Date(date);
       const dayName = dateObj.toLocaleDateString('fr-FR', { weekday: 'long' }).toUpperCase();
       weekRows += `
@@ -707,7 +696,6 @@ async function sendAttendanceReport() {
   } catch (error) {
     console.error("❌ Attendance report error:", error);
   } finally {
-    // ✅ Always release the lock after the job finishes (success or error)
     await releaseJobLock(lockId, lock.instanceId, lock.lockHash);
   }
 }
@@ -894,8 +882,21 @@ app.post('/api/demandes', async (req, res) => {
 
     const demandeId = insertResult.rows[0].id;
 
+    // ========== DEBUG LOGS - EMAIL ROUTING ==========
+    console.log(`\n🔍 [DEBUG] New demande created:`);
+    console.log(`   Demande ID  : ${demandeId}`);
+    console.log(`   Employee    : ${employe.nom} ${employe.prenom} (id: ${employe_id})`);
+    console.log(`   Type        : ${type_demande}`);
+    console.log(`   Responsable1: ${employe.mail_responsable1 || 'NOT SET'}`);
+    console.log(`   Responsable2: ${employe.mail_responsable2 || 'NOT SET'}`);
+    // ================================================
+
     if (employe.mail_responsable1) {
-      await envoyerEmailResponsable(employe, employe.mail_responsable1, demandeId, 1, {
+      // ========== DEBUG LOG ==========
+      console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to responsable1: ${employe.mail_responsable1}`);
+      // ================================
+
+      const emailResult = await envoyerEmailResponsable(employe, employe.mail_responsable1, demandeId, 1, {
         type_demande, titre, date_depart,
         date_retour: dateRetourFinal,
         heure_depart: heureDepartFinal,
@@ -905,8 +906,12 @@ app.post('/api/demandes', async (req, res) => {
         type_conge_autre: typeCongeAutreFinal,
         frais_deplacement: fraisDeplacementFinal
       });
+
+      // ========== DEBUG LOG ==========
+      console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email to responsable1 result:`, JSON.stringify(emailResult));
+      // ================================
     } else {
-      console.warn(`⚠️ Aucun responsable 1 défini pour ${employe.nom} ${employe.prenom}`);
+      console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No responsable1 defined for ${employe.nom} ${employe.prenom} — no email sent`);
     }
 
     res.json({ success: true, message: 'Demande créée avec succès', demandeId });
@@ -917,6 +922,16 @@ app.post('/api/demandes', async (req, res) => {
 });
 
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
+
+  // ========== DEBUG LOGS ==========
+  console.log(`\n📨 [DEBUG][envoyerEmailResponsable] Called:`);
+  console.log(`   Employee    : ${employe.nom} ${employe.prenom}`);
+  console.log(`   Recipient   : ${emailResponsable}`);
+  console.log(`   Demande ID  : ${demandeId}`);
+  console.log(`   Niveau      : ${niveau}`);
+  console.log(`   employe.id  : ${employe.id || employe.employe_id || 'UNDEFINED'}`);
+  // ================================
+
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
 
@@ -926,14 +941,24 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   let leaveBalanceValue = '0.000';
   try {
     const employeeId = employe?.id || employe?.employe_id || employe?.employee_id;
+
+    // ========== DEBUG LOG ==========
+    console.log(`   [DEBUG] employeeId for leave balance lookup: ${employeeId}`);
+    // ================================
+
     if (employeeId) {
       const lb = await poolHR.query(`SELECT balance FROM leave_balances WHERE employee_id = $1`, [employeeId]);
+
+      // ========== DEBUG LOG ==========
+      console.log(`   [DEBUG] Leave balance query returned ${lb.rows.length} row(s): ${lb.rows.length > 0 ? lb.rows[0].balance : 'none'}`);
+      // ================================
+
       if (lb.rows.length > 0 && lb.rows[0].balance !== undefined && lb.rows[0].balance !== null) {
         leaveBalanceValue = String(lb.rows[0].balance);
       }
     }
   } catch (e) {
-    console.error('❌ Erreur récupération solde congé:', e.message);
+    console.error(`   [DEBUG] ❌ Erreur récupération solde congé:`, e.message);
   }
 
   let detailsHtml = `
@@ -1005,10 +1030,27 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   };
 
   try {
+    // ========== DEBUG LOG ==========
+    console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Attempting sendEmailWithRetry to: ${emailResponsable}`);
+    // ================================
+
     await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
+
+    // ========== DEBUG LOG ==========
+    console.log(`✅ [DEBUG][DEMANDE ${demandeId}] Email successfully sent to: ${emailResponsable} (niveau ${niveau})`);
+    // ================================
+
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
+    return { success: true };
   } catch (error) {
+    // ========== DEBUG LOG ==========
+    console.error(`❌ [DEBUG][DEMANDE ${demandeId}] FAILED to send to: ${emailResponsable} (niveau ${niveau})`);
+    console.error(`   Error code   : ${error.code || 'N/A'}`);
+    console.error(`   Error message: ${error.message || JSON.stringify(error)}`);
+    // ================================
+
     console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
+    return { success: false, error: error.message };
   }
 }
 
