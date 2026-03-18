@@ -13,12 +13,14 @@ app.use(cors());
 app.use(express.json());
 
 // Configuration PostgreSQL
+const DB_PASSWORD = String.raw`$#fKcdXPg4@ue8AW`;
+
 const pool = new Pool({
-  user: process.env.DB_USER || 'administrationSTS',
-  host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
-  database: process.env.DB_NAME || 'rh_application',
-  password: process.env.DB_PASS || 'St$@0987',
-  port: process.env.DB_PORT || 5432,
+  user: 'adminavo',
+  host: 'avo-adb-001.postgres.database.azure.com',
+  database: 'rh-application',
+  password: DB_PASSWORD,
+  port: 5432,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -186,7 +188,7 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 // ==================== HELPER FUNCTIONS ====================
 
 // URL de base (backend déployé)
-const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:5001/api';
 
 // Chemin vers les templates Word
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
@@ -1791,10 +1793,19 @@ app.get('/api/smtp-status', async (req, res) => {
     transporters: statuses
   });
 });
+app.get('/api/test-smtp-local', async (req, res) => {
+  const transporter = emailPool.transporters[0];
+  try {
+    await transporter.verify();
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message, code: err.code });
+  }
+});
 
 // ==================== DÉMARRAGE DU SERVEUR ====================
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, async () => {
   console.log(`
