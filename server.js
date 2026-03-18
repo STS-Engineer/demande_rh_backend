@@ -439,6 +439,10 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       if (demande.type_demande === 'conges' && joursOuvres > 0) {
         demandeInfo.push({ label: 'Nombre de jours ouvrés:', value: `${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}`, highlight: true });
       }
+      // CHANGE 3: Show nombre_jours from employee input in PDF if available
+      if (demande.type_demande === 'conges' && demande.nombre_jours) {
+        demandeInfo.push({ label: 'Jours demandés (employé):', value: `${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}`, highlight: true });
+      }
       if (typeCongeLabel) demandeInfo.push({ label: 'Type de congé:', value: typeCongeLabel });
       if (demande.demi_journee) demandeInfo.push({ label: 'Demi-journée:', value: 'Oui' });
       if (demande.heure_depart) demandeInfo.push({ label: 'Heure de départ:', value: demande.heure_depart });
@@ -839,11 +843,12 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   }
 });
 
+// CHANGE 1: Extract nombre_jours from request body
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id, type_demande, titre, date_depart, date_retour,
     heure_depart, heure_retour, demi_journee, type_conge,
-    frais_deplacement, type_conge_autre
+    frais_deplacement, type_conge_autre, nombre_jours
   } = req.body;
 
   try {
@@ -868,16 +873,19 @@ app.post('/api/demandes', async (req, res) => {
     const fraisDeplacementFinal = frais_deplacement && frais_deplacement !== '' ? parseFloat(frais_deplacement) : null;
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
+    // CHANGE 1: Parse nombre_jours — null if not provided
+    const nombreJoursFinal = nombre_jours ? parseInt(nombre_jours) : null;
 
+    // CHANGE 2: Insert nombre_jours into the database
     const insertResult = await poolHR.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
-        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, statut)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, nombre_jours, statut)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id`,
       [employe_id, type_demande, titre, date_depart, dateRetourFinal,
         heureDepartFinal, heureRetourFinal, demi_journee || false,
-        typeCongeFinal, typeCongeAutreFinal, fraisDeplacementFinal, 'en_attente']
+        typeCongeFinal, typeCongeAutreFinal, fraisDeplacementFinal, nombreJoursFinal, 'en_attente']
     );
 
     const demandeId = insertResult.rows[0].id;
@@ -887,14 +895,13 @@ app.post('/api/demandes', async (req, res) => {
     console.log(`   Demande ID  : ${demandeId}`);
     console.log(`   Employee    : ${employe.nom} ${employe.prenom} (id: ${employe_id})`);
     console.log(`   Type        : ${type_demande}`);
+    console.log(`   Nombre jours: ${nombreJoursFinal}`);
     console.log(`   Responsable1: ${employe.mail_responsable1 || 'NOT SET'}`);
     console.log(`   Responsable2: ${employe.mail_responsable2 || 'NOT SET'}`);
     // ================================================
 
     if (employe.mail_responsable1) {
-      // ========== DEBUG LOG ==========
       console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to responsable1: ${employe.mail_responsable1}`);
-      // ================================
 
       const emailResult = await envoyerEmailResponsable(employe, employe.mail_responsable1, demandeId, 1, {
         type_demande, titre, date_depart,
@@ -904,12 +911,11 @@ app.post('/api/demandes', async (req, res) => {
         demi_journee,
         type_conge: typeCongeFinal,
         type_conge_autre: typeCongeAutreFinal,
-        frais_deplacement: fraisDeplacementFinal
+        frais_deplacement: fraisDeplacementFinal,
+        nombre_jours: nombreJoursFinal
       });
 
-      // ========== DEBUG LOG ==========
       console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email to responsable1 result:`, JSON.stringify(emailResult));
-      // ================================
     } else {
       console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No responsable1 defined for ${employe.nom} ${employe.prenom} — no email sent`);
     }
@@ -923,14 +929,12 @@ app.post('/api/demandes', async (req, res) => {
 
 async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
 
-  // ========== DEBUG LOGS ==========
   console.log(`\n📨 [DEBUG][envoyerEmailResponsable] Called:`);
   console.log(`   Employee    : ${employe.nom} ${employe.prenom}`);
   console.log(`   Recipient   : ${emailResponsable}`);
   console.log(`   Demande ID  : ${demandeId}`);
   console.log(`   Niveau      : ${niveau}`);
   console.log(`   employe.id  : ${employe.id || employe.employe_id || 'UNDEFINED'}`);
-  // ================================
 
   const baseUrl = BASE_URL;
   const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
@@ -942,16 +946,12 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   try {
     const employeeId = employe?.id || employe?.employe_id || employe?.employee_id;
 
-    // ========== DEBUG LOG ==========
     console.log(`   [DEBUG] employeeId for leave balance lookup: ${employeeId}`);
-    // ================================
 
     if (employeeId) {
       const lb = await poolHR.query(`SELECT balance FROM leave_balances WHERE employee_id = $1`, [employeeId]);
 
-      // ========== DEBUG LOG ==========
       console.log(`   [DEBUG] Leave balance query returned ${lb.rows.length} row(s): ${lb.rows.length > 0 ? lb.rows[0].balance : 'none'}`);
-      // ================================
 
       if (lb.rows.length > 0 && lb.rows[0].balance !== undefined && lb.rows[0].balance !== null) {
         leaveBalanceValue = String(lb.rows[0].balance);
@@ -973,6 +973,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
       <p><strong>Date de retour:</strong> ${details.date_retour ? formatDateShort(details.date_retour) : 'Non spécifié'}</p>
       <p><strong>Demi-journée:</strong> ${details.demi_journee ? 'Oui' : 'Non'}</p>
       <p><strong>Type de congé:</strong> ${typeCongeLabel}</p>
+      ${details.nombre_jours ? `<p><strong>Nombre de jours ouvrables demandés:</strong> <strong style="color:#1976d2;">${details.nombre_jours} jour${details.nombre_jours > 1 ? 's' : ''}</strong></p>` : ''}
     `;
   } else if (details.type_demande === 'autorisation') {
     detailsHtml += `
@@ -1030,25 +1031,15 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   };
 
   try {
-    // ========== DEBUG LOG ==========
     console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Attempting sendEmailWithRetry to: ${emailResponsable}`);
-    // ================================
-
     await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
-
-    // ========== DEBUG LOG ==========
     console.log(`✅ [DEBUG][DEMANDE ${demandeId}] Email successfully sent to: ${emailResponsable} (niveau ${niveau})`);
-    // ================================
-
     console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
     return { success: true };
   } catch (error) {
-    // ========== DEBUG LOG ==========
     console.error(`❌ [DEBUG][DEMANDE ${demandeId}] FAILED to send to: ${emailResponsable} (niveau ${niveau})`);
     console.error(`   Error code   : ${error.code || 'N/A'}`);
     console.error(`   Error message: ${error.message || JSON.stringify(error)}`);
-    // ================================
-
     console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
     return { success: false, error: error.message };
   }
@@ -1143,6 +1134,7 @@ app.get('/approuver-demande', async (req, res) => {
             <div class="info-item"><div class="info-label">Motif:</div><div class="info-value">${demande.titre}</div></div>
             <div class="info-item"><div class="info-label">Date de départ:</div><div class="info-value">${formatDateShort(demande.date_depart)}</div></div>
             ${demande.date_retour ? `<div class="info-item"><div class="info-label">Date de retour:</div><div class="info-value">${formatDateShort(demande.date_retour)}</div></div>` : ''}
+            ${demande.nombre_jours ? `<div class="info-item"><div class="info-label">Jours demandés:</div><div class="info-value" style="color:#1976d2; font-weight:600;">${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}</div></div>` : ''}
             ${demande.heure_depart ? `<div class="info-item"><div class="info-label">Heure de départ:</div><div class="info-value">${demande.heure_depart}</div></div>` : ''}
             ${demande.heure_retour ? `<div class="info-item"><div class="info-label">Heure de retour:</div><div class="info-value">${demande.heure_retour}</div></div>` : ''}
             ${demande.frais_deplacement ? `<div class="info-item"><div class="info-label">Frais de déplacement:</div><div class="info-value">${demande.frais_deplacement} TND</div></div>` : ''}
@@ -1288,7 +1280,8 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         date_depart: demande.date_depart, date_retour: demande.date_retour,
         heure_depart: demande.heure_depart, heure_retour: demande.heure_retour,
         demi_journee: demande.demi_journee, type_conge: demande.type_conge,
-        type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement
+        type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement,
+        nombre_jours: demande.nombre_jours
       }, resp1 ? resp1.fullName : 'le premier responsable');
 
       return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
@@ -1317,6 +1310,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
             ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
             ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
+            ${demande.nombre_jours ? `<p><strong>Nombre de jours demandés:</strong> ${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}</p>` : ''}
             ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
             ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
             ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
@@ -1346,7 +1340,8 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
               <p><strong>Employé:</strong> ${demande.nom} ${demande.prenom}</p>
               <p><strong>Type:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
               <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-              ${joursOuvres > 0 ? `<p><strong>Jours ouvrés:</strong> <strong>${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></p>` : ''}
+              ${joursOuvres > 0 ? `<p><strong>Jours ouvrés (calculés):</strong> <strong>${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></p>` : ''}
+              ${demande.nombre_jours ? `<p><strong>Jours demandés (employé):</strong> <strong>${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}</strong></p>` : ''}
             </div>
             <p style="color: #6b7280; font-size: 14px;">📎 Consultez le PDF joint pour tous les détails.</p>
           </div>
