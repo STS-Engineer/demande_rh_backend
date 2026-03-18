@@ -774,7 +774,7 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     const mailOptions = {
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: 'fethi.chaouachi@avocarbon.com',
+      to: 'rami.mejri@avocarbon.com',
       subject: `Demande de ${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
