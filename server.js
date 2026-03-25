@@ -1428,7 +1428,162 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
     res.status(500).json({ error: 'Erreur lors de la récupération des demandes' });
   }
 });
+async function sendTeamAttendanceReportPerResponsable() {
+  const lockId = 'team_attendance_report_job';
+  const lock = await acquireJobLock(lockId);
 
+  if (!lock.acquired) {
+    console.log(`⏭️ [Team Attendance Report] Skipping — lock held by another instance`);
+    return;
+  }
+
+  try {
+    const today = new Date();
+    const day = today.getDay();
+
+    if (day === 0 || day === 6) {
+      console.log("Weekend - no team attendance report");
+      return;
+    }
+
+    const todayStr = today.toISOString().split('T')[0];
+
+    const TAHA_EMAIL = 'taha.khiari@avocarbon.com';
+
+    // 1. Get today's attendance from attendance DB
+    const attendanceResult = await poolAttendance.query(`
+      SELECT full_name, arrival_time, departure_time
+      FROM attendance_daily
+      WHERE work_date = $1
+      ORDER BY arrival_time
+    `, [todayStr]);
+
+    if (attendanceResult.rows.length === 0) {
+      console.log("No attendance data today — skipping team report");
+      return;
+    }
+
+    // 2. Get only employees where mail_responsable1 = Taha
+    const employeesResult = await poolHR.query(`
+      SELECT 
+        CONCAT(nom, ' ', prenom) AS full_name,
+        poste,
+        mail_responsable1
+      FROM employees
+      WHERE date_depart IS NULL
+        AND mail_responsable1 = $1
+    `, [TAHA_EMAIL]);
+
+    if (employeesResult.rows.length === 0) {
+      console.log(`No employees found under ${TAHA_EMAIL}`);
+      return;
+    }
+
+    // 3. Build a map: full_name => poste
+    const employeeMap = {};
+    employeesResult.rows.forEach(emp => {
+      employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
+    });
+
+    // 4. Filter attendance to only Taha's team
+    const teamRecords = attendanceResult.rows
+      .filter(record => employeeMap[record.full_name.trim().toLowerCase()])
+      .map(record => ({
+        full_name: record.full_name,
+        poste: employeeMap[record.full_name.trim().toLowerCase()],
+        arrival_time: record.arrival_time || '—',
+        departure_time: record.departure_time || '—'
+      }));
+
+    if (teamRecords.length === 0) {
+      console.log("No team members of Taha present today");
+      return;
+    }
+
+    const rows = teamRecords.map((r, i) => `
+      <tr style="border-bottom:1px solid #f3f4f6; ${i % 2 !== 0 ? 'background:#fafafa;' : ''}">
+        <td style="padding:10px; color:#374151; font-size:14px;">${r.full_name}</td>
+        <td style="padding:10px; color:#374151; font-size:14px;">${r.poste}</td>
+        <td style="padding:10px; text-align:center; color:#374151; font-size:14px;">${r.arrival_time}</td>
+        <td style="padding:10px; text-align:center; color:${r.departure_time !== '—' ? '#374151' : '#9ca3af'}; font-size:14px;">${r.departure_time}</td>
+      </tr>
+    `).join('');
+
+    const mailOptions = {
+      from: {
+        name: 'Administration STS',
+        address: 'administration.STS@avocarbon.com'
+      },
+      to: TAHA_EMAIL,
+      subject: `Rapport de Présence Équipe — ${formatDateFR(today)}`,
+      html: `
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:30px 20px; background:#f4f4f4; font-family: Arial, sans-serif;">
+
+          <div style="width:100%; background:#ffffff; border:1px solid #ddd; border-radius:6px; overflow:hidden;">
+
+            <!-- HEADER -->
+            <div style="background:#2d4a6e; padding:24px 32px;">
+              <p style="margin:0; color:#94a3b8; font-size:12px; text-transform:uppercase; letter-spacing:1px;">Administration STS</p>
+              <h1 style="margin:6px 0 0; color:#ffffff; font-size:20px; font-weight:700;">Rapport de Présence — Votre Équipe</h1>
+              <p style="margin:4px 0 0; color:#94a3b8; font-size:13px;">
+                ${today.toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                — ${today.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            </div>
+
+            <!-- STATS -->
+            <div style="border-bottom:1px solid #e5e7eb; padding:20px 32px; background:#f9fafb;">
+              <span style="font-size:28px; font-weight:700; color:#1e293b;">${teamRecords.length}</span>
+              <span style="font-size:13px; color:#6b7280; margin-left:8px;">membre(s) présent(s) aujourd'hui</span>
+            </div>
+
+            <!-- TABLE -->
+            <div style="padding:28px 32px;">
+              <p style="margin:0 0 12px; font-size:13px; font-weight:700; color:#1e293b; text-transform:uppercase; letter-spacing:0.5px;">
+                Arrivées du jour — ${formatDateFR(todayStr)}
+              </p>
+
+              <table style="width:100%; border-collapse:collapse; font-size:14px;">
+                <thead>
+                  <tr style="border-bottom:2px solid #1e293b;">
+                    <th style="text-align:left; padding:8px 10px; color:#374151; font-weight:600;">Employé</th>
+                    <th style="text-align:left; padding:8px 10px; color:#374151; font-weight:600;">Poste</th>
+                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600;">Arrivée</th>
+                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600;">Départ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- FOOTER -->
+            <div style="background:#f9fafb; border-top:1px solid #e5e7eb; padding:16px 32px; text-align:center;">
+              <p style="margin:0; font-size:12px; color:#9ca3af;">
+                Rapport automatique — Système RH STS &nbsp;•&nbsp; ${formatDateFR(today)} à ${today.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            </div>
+
+          </div>
+
+        </body>
+        </html>
+      `
+    };
+
+    await sendEmailWithRetry(mailOptions, `Team attendance report → ${TAHA_EMAIL}`);
+    console.log(`✅ Team report sent to Taha (${teamRecords.length} employees present)`);
+
+  } catch (error) {
+    console.error("❌ Team attendance report error:", error);
+  } finally {
+    await releaseJobLock(lockId, lock.instanceId, lock.lockHash);
+  }
+}
 // ==================== DIAGNOSTIC ROUTES ====================
 
 app.get('/health', (req, res) => {
@@ -1476,6 +1631,7 @@ try {
   cron.schedule('0 9 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance report...");
     await sendAttendanceReport();
+    await sendTeamAttendanceReportPerResponsable();
   }, { timezone: "Africa/Tunis" });
 
   console.log("✅ Attendance reports scheduled for weekdays at 9:15 AM Tunisia time");
