@@ -874,7 +874,7 @@ app.post('/api/demandes', async (req, res) => {
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
     // CHANGE 1: Parse nombre_jours — null if not provided
-    const nombreJoursFinal = nombre_jours ? parseInt(nombre_jours) : null;
+    const nombreJoursFinal = nombre_jours ? parseFloat(nombre_jours) : null;
 
     // CHANGE 2: Insert nombre_jours into the database
     const insertResult = await poolHR.query(
