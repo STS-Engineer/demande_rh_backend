@@ -1625,20 +1625,20 @@ app.get('/api/smtp-status', async (req, res) => {
 
 // ==================== CRON JOB ====================
 
-try {
-  const cron = require('node-cron');
+//try {
+ // const cron = require('node-cron');
 
-  cron.schedule('0 9 * * 1-5', async () => {
-    console.log("⏰ Running automatic attendance report...");
-    await sendAttendanceReport();
-    await sendTeamAttendanceReportPerResponsable();
-  }, { timezone: "Africa/Tunis" });
+//  cron.schedule('0 9 * * 1-5', async () => {
+//    console.log("⏰ Running automatic attendance report...");
+//    await sendAttendanceReport();
+//    await sendTeamAttendanceReportPerResponsable();
+//  }, { timezone: "Africa/Tunis" });
 
-  console.log("✅ Attendance reports scheduled for weekdays at 9:15 AM Tunisia time");
+//  console.log("✅ Attendance reports scheduled for weekdays at 9:15 AM Tunisia time");
 
-} catch (error) {
-  console.warn("⚠️ Cron scheduling not available:", error.message);
-}
+//} catch (error) {
+//  console.warn("⚠️ Cron scheduling not available:", error.message);
+//}
 
 // ==================== SERVER START ====================
 
