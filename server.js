@@ -703,7 +703,7 @@ async function sendAttendanceReport() {
   }
 }
 
-// ==================== FIX 1: Manual trigger now calls BOTH functions ====================
+// Manual trigger endpoint — calls BOTH functions
 app.post('/api/attendance/send-report', async (req, res) => {
   try {
     await sendAttendanceReport();
@@ -1442,8 +1442,12 @@ async function sendTeamAttendanceReportPerResponsable() {
 
     const todayStr = today.toISOString().split('T')[0];
 
-    // ⚠️ TESTING: sending to rami.mejri — change back to taha.khiari@avocarbon.com after test
-    const TAHA_EMAIL = 'rami.mejri@avocarbon.com';
+    // RESPONSIBLE_EMAIL: always Taha's real email — used ONLY for the DB query
+    const RESPONSIBLE_EMAIL = 'taha.khiari@avocarbon.com';
+
+    // ⚠️ TESTING: email is sent to rami.mejri instead of Taha
+    // When done testing, change REPORT_RECIPIENT to: 'taha.khiari@avocarbon.com'
+    const REPORT_RECIPIENT = 'rami.mejri@avocarbon.com';
 
     // 1. Get today's attendance from attendance DB
     const attendanceResult = await poolAttendance.query(`
@@ -1458,7 +1462,7 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
-    // 2. Get only employees where mail_responsable1 = Taha
+    // 2. Get only employees where mail_responsable1 = Taha (always uses RESPONSIBLE_EMAIL)
     const employeesResult = await poolHR.query(`
       SELECT 
         CONCAT(nom, ' ', prenom) AS full_name,
@@ -1467,10 +1471,10 @@ async function sendTeamAttendanceReportPerResponsable() {
       FROM employees
       WHERE date_depart IS NULL
         AND mail_responsable1 = $1
-    `, [TAHA_EMAIL]);
+    `, [RESPONSIBLE_EMAIL]);
 
     if (employeesResult.rows.length === 0) {
-      console.log(`No employees found under ${TAHA_EMAIL}`);
+      console.log(`No employees found under ${RESPONSIBLE_EMAIL}`);
       return;
     }
 
@@ -1480,12 +1484,11 @@ async function sendTeamAttendanceReportPerResponsable() {
       employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
     });
 
-    // ==================== FIX 2: Debug name matching ====================
+    // Debug name matching
     console.log("🔍 [DEBUG] Attendance DB names:", attendanceResult.rows.map(r => r.full_name));
     console.log("🔍 [DEBUG] HR DB employee keys:", Object.keys(employeeMap));
-    // ====================================================================
 
-    // 4. Filter attendance to only the team
+    // 4. Filter attendance to only Taha's team
     const teamRecords = attendanceResult.rows
       .filter(record => employeeMap[record.full_name.trim().toLowerCase()])
       .map(record => ({
@@ -1516,7 +1519,7 @@ async function sendTeamAttendanceReportPerResponsable() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: TAHA_EMAIL,
+      to: REPORT_RECIPIENT,  // ← sends to you during testing, change to Taha when done
       subject: `Rapport de Présence Équipe — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -1577,8 +1580,8 @@ async function sendTeamAttendanceReportPerResponsable() {
       `
     };
 
-    await sendEmailWithRetry(mailOptions, `Team attendance report → ${TAHA_EMAIL}`);
-    console.log(`✅ Team report sent to ${TAHA_EMAIL} (${teamRecords.length} employees present)`);
+    await sendEmailWithRetry(mailOptions, `Team attendance report → ${REPORT_RECIPIENT}`);
+    console.log(`✅ Team report sent to ${REPORT_RECIPIENT} (${teamRecords.length} employees present)`);
 
   } catch (error) {
     console.error("❌ Team attendance report error:", error);
@@ -1631,7 +1634,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('20 10 * * 1-5', async () => {
+  cron.schedule('0 11 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     await sendTeamAttendanceReportPerResponsable();
