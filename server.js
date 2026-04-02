@@ -439,7 +439,6 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       if (demande.type_demande === 'conges' && joursOuvres > 0) {
         demandeInfo.push({ label: 'Nombre de jours ouvrés:', value: `${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}`, highlight: true });
       }
-      // CHANGE 3: Show nombre_jours from employee input in PDF if available
       if (demande.type_demande === 'conges' && demande.nombre_jours) {
         demandeInfo.push({ label: 'Jours demandés (employé):', value: `${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}`, highlight: true });
       }
@@ -582,7 +581,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'fethi.chaouachi@avocarbon.com',
+      to: 'rami.mejri@avocarbon.com',
       subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -704,11 +703,12 @@ async function sendAttendanceReport() {
   }
 }
 
-// Manual trigger endpoint
+// ==================== FIX 1: Manual trigger now calls BOTH functions ====================
 app.post('/api/attendance/send-report', async (req, res) => {
   try {
     await sendAttendanceReport();
-    res.json({ success: true, message: "Attendance report sent successfully" });
+    await sendTeamAttendanceReportPerResponsable();
+    res.json({ success: true, message: "Both attendance reports sent successfully" });
   } catch (error) {
     console.error("Error in manual attendance report:", error);
     res.status(500).json({ error: "Error sending attendance report", details: error.message });
@@ -843,7 +843,6 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   }
 });
 
-// CHANGE 1: Extract nombre_jours from request body
 app.post('/api/demandes', async (req, res) => {
   const {
     employe_id, type_demande, titre, date_depart, date_retour,
@@ -873,10 +872,8 @@ app.post('/api/demandes', async (req, res) => {
     const fraisDeplacementFinal = frais_deplacement && frais_deplacement !== '' ? parseFloat(frais_deplacement) : null;
     const typeCongeFinal = type_conge && type_conge !== '' ? type_conge : null;
     const typeCongeAutreFinal = type_conge_autre && type_conge_autre.trim() !== '' ? type_conge_autre.trim() : null;
-    // CHANGE 1: Parse nombre_jours — null if not provided
     const nombreJoursFinal = nombre_jours ? parseFloat(nombre_jours) : null;
 
-    // CHANGE 2: Insert nombre_jours into the database
     const insertResult = await poolHR.query(
       `INSERT INTO demande_rh 
        (employe_id, type_demande, titre, date_depart, date_retour, 
@@ -890,7 +887,6 @@ app.post('/api/demandes', async (req, res) => {
 
     const demandeId = insertResult.rows[0].id;
 
-    // ========== DEBUG LOGS - EMAIL ROUTING ==========
     console.log(`\n🔍 [DEBUG] New demande created:`);
     console.log(`   Demande ID  : ${demandeId}`);
     console.log(`   Employee    : ${employe.nom} ${employe.prenom} (id: ${employe_id})`);
@@ -898,7 +894,6 @@ app.post('/api/demandes', async (req, res) => {
     console.log(`   Nombre jours: ${nombreJoursFinal}`);
     console.log(`   Responsable1: ${employe.mail_responsable1 || 'NOT SET'}`);
     console.log(`   Responsable2: ${employe.mail_responsable2 || 'NOT SET'}`);
-    // ================================================
 
     if (employe.mail_responsable1) {
       console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to responsable1: ${employe.mail_responsable1}`);
@@ -1034,13 +1029,11 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Attempting sendEmailWithRetry to: ${emailResponsable}`);
     await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
     console.log(`✅ [DEBUG][DEMANDE ${demandeId}] Email successfully sent to: ${emailResponsable} (niveau ${niveau})`);
-    console.log(`✅ Email envoyé à ${emailResponsable} pour demande ${demandeId} (niveau ${niveau})`);
     return { success: true };
   } catch (error) {
     console.error(`❌ [DEBUG][DEMANDE ${demandeId}] FAILED to send to: ${emailResponsable} (niveau ${niveau})`);
     console.error(`   Error code   : ${error.code || 'N/A'}`);
     console.error(`   Error message: ${error.message || JSON.stringify(error)}`);
-    console.error(`❌ Erreur envoi email à responsable ${niveau}:`, error);
     return { success: false, error: error.message };
   }
 }
@@ -1428,6 +1421,7 @@ app.get('/api/demandes/employe/:id', async (req, res) => {
     res.status(500).json({ error: 'Erreur lors de la récupération des demandes' });
   }
 });
+
 async function sendTeamAttendanceReportPerResponsable() {
   const lockId = 'team_attendance_report_job';
   const lock = await acquireJobLock(lockId);
@@ -1448,7 +1442,8 @@ async function sendTeamAttendanceReportPerResponsable() {
 
     const todayStr = today.toISOString().split('T')[0];
 
-    const TAHA_EMAIL = 'taha.khiari@avocarbon.com';
+    // ⚠️ TESTING: sending to rami.mejri — change back to taha.khiari@avocarbon.com after test
+    const TAHA_EMAIL = 'rami.mejri@avocarbon.com';
 
     // 1. Get today's attendance from attendance DB
     const attendanceResult = await poolAttendance.query(`
@@ -1479,13 +1474,18 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
-    // 3. Build a map: full_name => poste
+    // 3. Build a map: full_name (lowercase) => poste
     const employeeMap = {};
     employeesResult.rows.forEach(emp => {
       employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
     });
 
-    // 4. Filter attendance to only Taha's team
+    // ==================== FIX 2: Debug name matching ====================
+    console.log("🔍 [DEBUG] Attendance DB names:", attendanceResult.rows.map(r => r.full_name));
+    console.log("🔍 [DEBUG] HR DB employee keys:", Object.keys(employeeMap));
+    // ====================================================================
+
+    // 4. Filter attendance to only the team
     const teamRecords = attendanceResult.rows
       .filter(record => employeeMap[record.full_name.trim().toLowerCase()])
       .map(record => ({
@@ -1495,8 +1495,10 @@ async function sendTeamAttendanceReportPerResponsable() {
         departure_time: record.departure_time || '—'
       }));
 
+    console.log(`🔍 [DEBUG] teamRecords matched: ${teamRecords.length}`);
+
     if (teamRecords.length === 0) {
-      console.log("No team members of Taha present today");
+      console.log("No team members present today — skipping team report email");
       return;
     }
 
@@ -1576,7 +1578,7 @@ async function sendTeamAttendanceReportPerResponsable() {
     };
 
     await sendEmailWithRetry(mailOptions, `Team attendance report → ${TAHA_EMAIL}`);
-    console.log(`✅ Team report sent to Taha (${teamRecords.length} employees present)`);
+    console.log(`✅ Team report sent to ${TAHA_EMAIL} (${teamRecords.length} employees present)`);
 
   } catch (error) {
     console.error("❌ Team attendance report error:", error);
@@ -1584,6 +1586,7 @@ async function sendTeamAttendanceReportPerResponsable() {
     await releaseJobLock(lockId, lock.instanceId, lock.lockHash);
   }
 }
+
 // ==================== DIAGNOSTIC ROUTES ====================
 
 app.get('/health', (req, res) => {
@@ -1625,20 +1628,20 @@ app.get('/api/smtp-status', async (req, res) => {
 
 // ==================== CRON JOB ====================
 
-//try {
- // const cron = require('node-cron');
+try {
+  const cron = require('node-cron');
 
-//  cron.schedule('0 9 * * 1-5', async () => {
-//    console.log("⏰ Running automatic attendance report...");
-//    await sendAttendanceReport();
-//    await sendTeamAttendanceReportPerResponsable();
-//  }, { timezone: "Africa/Tunis" });
+  cron.schedule('20 10 * * 1-5', async () => {
+    console.log("⏰ Running automatic attendance reports...");
+    await sendAttendanceReport();
+    await sendTeamAttendanceReportPerResponsable();
+  }, { timezone: "Africa/Tunis" });
 
-//  console.log("✅ Attendance reports scheduled for weekdays at 9:15 AM Tunisia time");
+  console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
 
-//} catch (error) {
-//  console.warn("⚠️ Cron scheduling not available:", error.message);
-//}
+} catch (error) {
+  console.warn("⚠️ Cron scheduling not available:", error.message);
+}
 
 // ==================== SERVER START ====================
 
