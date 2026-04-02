@@ -581,7 +581,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: 'rami.mejri@avocarbon.com',
+      to: ['fethi.chaouachi@avocarbon.com','rami.mejri@avocarbon.com'],
       subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -1447,7 +1447,7 @@ async function sendTeamAttendanceReportPerResponsable() {
 
     // ⚠️ TESTING: email is sent to rami.mejri instead of Taha
     // When done testing, change REPORT_RECIPIENT to: 'taha.khiari@avocarbon.com'
-    const REPORT_RECIPIENT = 'rami.mejri@avocarbon.com';
+    const REPORT_RECIPIENT = 'taha.khiari@avocarbon.com';
 
     // 1. Get today's attendance from attendance DB
     const attendanceResult = await poolAttendance.query(`
@@ -1636,7 +1636,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('20 12 * * 1-5', async () => {
+  cron.schedule('30 9 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     await sendTeamAttendanceReportPerResponsable();
