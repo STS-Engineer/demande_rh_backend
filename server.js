@@ -1463,9 +1463,11 @@ async function sendTeamAttendanceReportPerResponsable() {
     }
 
     // 2. Get only employees where mail_responsable1 = Taha (always uses RESPONSIBLE_EMAIL)
+    // ✅ FIX: Changed CONCAT(nom, ' ', prenom) to CONCAT(prenom, ' ', nom)
+    //    to match the "Firstname Lastname" format stored in the attendance database
     const employeesResult = await poolHR.query(`
       SELECT 
-        CONCAT(nom, ' ', prenom) AS full_name,
+        CONCAT(prenom, ' ', nom) AS full_name,
         poste,
         mail_responsable1
       FROM employees
