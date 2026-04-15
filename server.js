@@ -234,6 +234,227 @@ async function optimizeAttachments(attachments) {
   });
 }
 
+function formatTimeHHMM(value) {
+  if (!value) return '—';
+  if (typeof value === 'string') return value.slice(0, 5);
+  try {
+    return String(value).slice(0, 5);
+  } catch {
+    return '—';
+  }
+}
+
+function toMinutesFromTime(value) {
+  if (!value) return null;
+  const s = typeof value === 'string' ? value : String(value);
+  const match = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  return parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+}
+
+function formatMinutesToHours(minutes) {
+  if (minutes === null || minutes === undefined || Number.isNaN(minutes)) return '—';
+  const safe = Math.max(0, Math.round(minutes));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  return `${h}h${String(m).padStart(2, '0')}`;
+}
+
+function enumerateWeekdays(startDateStr, endDateStr) {
+  const dates = [];
+  const current = new Date(`${startDateStr}T00:00:00`);
+  const end = new Date(`${endDateStr}T00:00:00`);
+
+  while (current <= end) {
+    const day = current.getDay();
+    if (day >= 1 && day <= 5) {
+      const iso = current.toISOString().split('T')[0];
+      dates.push({
+        iso,
+        shortLabel: current.toLocaleDateString('fr-FR', {
+          weekday: 'short',
+          day: '2-digit',
+          month: '2-digit'
+        }).replace('.', '')
+      });
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dates;
+}
+
+function computeWorkedMinutes(arrivalTime, departureTime, lunchBreakMinutes = 60) {
+  const arrival = toMinutesFromTime(arrivalTime);
+  const departure = toMinutesFromTime(departureTime);
+
+  if (arrival === null || departure === null || departure <= arrival) return null;
+
+  const raw = departure - arrival;
+  return Math.max(0, raw - lunchBreakMinutes);
+}
+
+function getRequestDatesInRange(request, startDateStr, endDateStr) {
+  const result = [];
+  const start = new Date(`${request.date_depart}T00:00:00`);
+  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
+  const reportStart = new Date(`${startDateStr}T00:00:00`);
+  const reportEnd = new Date(`${endDateStr}T00:00:00`);
+
+  const cursor = new Date(start > reportStart ? start : reportStart);
+  const finalEnd = end < reportEnd ? end : reportEnd;
+
+  while (cursor <= finalEnd) {
+    const day = cursor.getDay();
+    if (day >= 1 && day <= 5) {
+      result.push(cursor.toISOString().split('T')[0]);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return result;
+}
+
+function buildApprovedRequestMap(requestRows, startDateStr, endDateStr) {
+  const map = new Map();
+
+  for (const req of requestRows) {
+    const coveredDates = getRequestDatesInRange(req, startDateStr, endDateStr);
+    for (const date of coveredDates) {
+      const key = `${req.employe_id}__${date}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(req);
+    }
+  }
+
+  return map;
+}
+
+function getAuthorizationMinutes(req) {
+  const start = toMinutesFromTime(req.heure_depart);
+  const end = toMinutesFromTime(req.heure_retour);
+  if (start === null || end === null || end <= start) return null;
+  return end - start;
+}
+
+function getLateJustified(arrivalTime, requestsForDay, lateThresholdMinutes = 8 * 60 + 30) {
+  const arrival = toMinutesFromTime(arrivalTime);
+  if (arrival === null || arrival <= lateThresholdMinutes) return false;
+
+  return requestsForDay.some(req => {
+    if (req.type_demande !== 'autorisation') return false;
+    const start = toMinutesFromTime(req.heure_depart);
+    const end = toMinutesFromTime(req.heure_retour);
+    if (start === null || end === null) return false;
+    return start <= lateThresholdMinutes && end >= arrival;
+  });
+}
+
+function chooseDayDisplay(attendanceRow, requestsForDay) {
+  const conge = requestsForDay.find(r => r.type_demande === 'conges');
+  const autorisations = requestsForDay.filter(r => r.type_demande === 'autorisation');
+  const mission = requestsForDay.find(r => r.type_demande === 'mission');
+
+  if (conge) {
+    if (conge.demi_journee) {
+      return {
+        minutes: 240,
+        text: '4h00 (congé 1/2 journée)',
+        lateCount: 0
+      };
+    }
+    return {
+      minutes: 0,
+      text: 'Congé',
+      lateCount: 0
+    };
+  }
+
+  const arrival = attendanceRow?.arrival_time || null;
+  const departure = attendanceRow?.departure_time || null;
+  const workedMinutes = computeWorkedMinutes(arrival, departure, 60);
+
+  const totalAuthorizationMinutes = autorisations.reduce((sum, req) => {
+    const m = getAuthorizationMinutes(req);
+    return sum + (m || 0);
+  }, 0);
+
+  if (attendanceRow && workedMinutes !== null) {
+    const lateJustified = getLateJustified(arrival, requestsForDay);
+    const isLate = toMinutesFromTime(arrival) !== null && toMinutesFromTime(arrival) > (8 * 60 + 30) && !lateJustified;
+
+    let finalMinutes = workedMinutes;
+    let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
+
+    if (totalAuthorizationMinutes > 0) {
+      finalMinutes += totalAuthorizationMinutes;
+      details += `, autorisation ${formatMinutesToHours(totalAuthorizationMinutes)}`;
+    } else if (mission) {
+      const missionMinutes = getAuthorizationMinutes(mission);
+      if (missionMinutes) {
+        finalMinutes += missionMinutes;
+        details += `, mission ${formatMinutesToHours(missionMinutes)}`;
+      } else {
+        details += ', mission';
+      }
+    }
+
+    return {
+      minutes: finalMinutes,
+      text: `${formatMinutesToHours(finalMinutes)} (${details})`,
+      lateCount: isLate ? 1 : 0
+    };
+  }
+
+  if (attendanceRow && (arrival || departure)) {
+    const partialText = `${arrival ? formatTimeHHMM(arrival) : 'entrée manquante'} → ${departure ? formatTimeHHMM(departure) : 'sortie manquante'}`;
+    return {
+      minutes: 0,
+      text: `— (${partialText})`,
+      lateCount: 0
+    };
+  }
+
+  if (totalAuthorizationMinutes > 0) {
+    return {
+      minutes: totalAuthorizationMinutes,
+      text: `${formatMinutesToHours(totalAuthorizationMinutes)} (autorisation)`,
+      lateCount: 0
+    };
+  }
+
+  if (mission) {
+    const missionMinutes = getAuthorizationMinutes(mission);
+    if (missionMinutes) {
+      return {
+        minutes: missionMinutes,
+        text: `${formatMinutesToHours(missionMinutes)} (mission)`,
+        lateCount: 0
+      };
+    }
+    return {
+      minutes: 0,
+      text: 'Mission',
+      lateCount: 0
+    };
+  }
+
+  return {
+    minutes: 0,
+    text: '—',
+    lateCount: 0
+  };
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ==================== ADVISORY LOCK FUNCTIONS (prevents duplicate emails on Azure multi-instance) ====================
 
 const acquireJobLock = async (lockId) => {
@@ -516,72 +737,162 @@ async function sendAttendanceReport() {
 
     console.log(`📊 Attendance report range: ${startDate} -> ${endDate}`);
 
-    const arrivals = await poolAttendance.query(`
-      SELECT full_name, arrival_time
-      FROM attendance_daily
-      WHERE work_date = $1
-      ORDER BY arrival_time
-    `, [todayStr]);
+    const activeEmployeesResult = await poolHR.query(`
+      SELECT id, matricule, nom, prenom
+      FROM employees
+      WHERE date_depart IS NULL
+        AND COALESCE(statut, 'actif') = 'actif'
+      ORDER BY nom, prenom
+    `);
 
-    const weekData = await poolAttendance.query(`
-      SELECT full_name, work_date, arrival_time, departure_time
-      FROM attendance_daily
-      WHERE work_date BETWEEN $1 AND $2
-      ORDER BY work_date, full_name
-    `, [startDate, endDate]);
+    const activeEmployees = activeEmployeesResult.rows;
 
-    const groupedByDate = {};
-    weekData.rows.forEach(row => {
-      if (!groupedByDate[row.work_date]) groupedByDate[row.work_date] = [];
-      groupedByDate[row.work_date].push(row);
+    const attendanceEmployeesResult = await poolAttendance.query(`
+      SELECT uid, matricule, full_name
+      FROM employees
+    `);
+
+    const attendanceByMatricule = new Map();
+    attendanceEmployeesResult.rows.forEach(row => {
+      if (row.matricule) {
+        attendanceByMatricule.set(String(row.matricule).trim(), row);
+      }
     });
 
-    const totalPresentToday = arrivals.rows.length;
-    const totalPresentWeek = weekData.rows.length;
-    const avgPerDay = Object.keys(groupedByDate).length > 0
-      ? Math.round(totalPresentWeek / Object.keys(groupedByDate).length)
-      : 0;
+    const employeesForReport = activeEmployees.map(emp => {
+      const attendanceEmp = attendanceByMatricule.get(String(emp.matricule).trim());
+      return {
+        hrId: emp.id,
+        matricule: emp.matricule,
+        fullName: `${emp.prenom} ${emp.nom}`,
+        attendanceUid: attendanceEmp ? attendanceEmp.uid : null,
+        attendanceFullName: attendanceEmp ? attendanceEmp.full_name : `${emp.prenom} ${emp.nom}`
+      };
+    });
 
-    const totalEmployeesResult = await poolAttendance.query(`SELECT COUNT(*) as total FROM employees`);
-    const totalEmployees = parseInt(totalEmployeesResult.rows[0].total);
+    const activeAttendanceUids = employeesForReport
+      .filter(e => e.attendanceUid !== null && e.attendanceUid !== undefined)
+      .map(e => e.attendanceUid);
+
+    const arrivals = activeAttendanceUids.length > 0
+      ? await poolAttendance.query(`
+          SELECT uid, full_name, arrival_time
+          FROM attendance_daily
+          WHERE work_date = $1
+            AND uid = ANY($2::int[])
+          ORDER BY arrival_time NULLS LAST, full_name
+        `, [todayStr, activeAttendanceUids])
+      : { rows: [] };
+
+    const weekData = activeAttendanceUids.length > 0
+      ? await poolAttendance.query(`
+          SELECT uid, full_name, work_date, arrival_time, departure_time, status
+          FROM attendance_daily
+          WHERE work_date BETWEEN $1 AND $2
+            AND uid = ANY($3::int[])
+          ORDER BY work_date, full_name
+        `, [startDate, endDate, activeAttendanceUids])
+      : { rows: [] };
+
+    const approvedRequestsResult = await poolHR.query(`
+      SELECT *
+      FROM demande_rh
+      WHERE statut = 'approuve'
+        AND date_depart <= $2
+        AND COALESCE(date_retour, date_depart) >= $1
+    `, [startDate, endDate]);
+
+    const approvedRequestMap = buildApprovedRequestMap(
+      approvedRequestsResult.rows,
+      startDate,
+      endDate
+    );
+
+    const attendanceByUidDate = new Map();
+    weekData.rows.forEach(row => {
+      const workDate =
+        row.work_date instanceof Date
+          ? row.work_date.toISOString().split('T')[0]
+          : String(row.work_date).split('T')[0];
+
+      const key = `${row.uid}__${workDate}`;
+      attendanceByUidDate.set(key, row);
+    });
+
+    const weekDays = enumerateWeekdays(startDate, endDate);
+
+    const totalPresentToday = arrivals.rows.filter(r => r.arrival_time).length;
+    const totalEmployees = employeesForReport.length;
 
     const arrivalsRows = arrivals.rows.map((r, i) => `
       <tr style="border-bottom:1px solid #f3f4f6; ${i % 2 !== 0 ? 'background:#fafafa;' : ''}">
-        <td style="padding:10px 10px; color:#374151; font-size:14px;">${r.full_name}</td>
-        <td style="padding:10px 10px; text-align:center; color:#374151; font-size:14px;">${r.arrival_time || '—'}</td>
+        <td style="padding:10px 10px; color:#374151; font-size:14px;">${escapeHtml(r.full_name)}</td>
+        <td style="padding:10px 10px; text-align:center; color:#374151; font-size:14px;">${formatTimeHHMM(r.arrival_time)}</td>
       </tr>
     `).join('');
 
-    let weekRows = '';
-    let rowIndex = 0;
-    for (const [date, records] of Object.entries(groupedByDate)) {
-      const dateObj = new Date(date);
-      const dayName = dateObj.toLocaleDateString('fr-FR', { weekday: 'long' }).toUpperCase();
-      weekRows += `
-        <tr>
-          <td colspan="3" style="padding:8px 10px; background:#f3f4f6; font-size:12px; font-weight:700; color:#374151; letter-spacing:0.5px;">
-            ${dayName} ${formatDateFR(date)}
+    let totalWorkedMinutesWeek = 0;
+    let totalLateCount = 0;
+    let employeesWithAnyData = 0;
+
+    const headerDayColumns = weekDays.map(d => `
+      <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600; min-width:160px;">
+        ${escapeHtml(d.shortLabel)}
+      </th>
+    `).join('');
+
+    const reportRows = employeesForReport.map((emp, rowIndex) => {
+      let employeeWeekMinutes = 0;
+      let employeeLateCount = 0;
+      let employeeHasData = false;
+
+      const dayCells = weekDays.map(dayInfo => {
+        const attendanceKey = emp.attendanceUid !== null && emp.attendanceUid !== undefined
+          ? `${emp.attendanceUid}__${dayInfo.iso}`
+          : null;
+
+        const attendanceRow = attendanceKey ? attendanceByUidDate.get(attendanceKey) : null;
+        const requestsForDay = approvedRequestMap.get(`${emp.hrId}__${dayInfo.iso}`) || [];
+
+        const dayResult = chooseDayDisplay(attendanceRow, requestsForDay);
+
+        if (dayResult.text !== '—') employeeHasData = true;
+        employeeWeekMinutes += dayResult.minutes;
+        employeeLateCount += dayResult.lateCount;
+
+        return `
+          <td style="padding:10px 8px; text-align:center; color:#374151; font-size:13px; vertical-align:top;">
+            ${escapeHtml(dayResult.text)}
+          </td>
+        `;
+      }).join('');
+
+      if (employeeHasData) employeesWithAnyData++;
+      totalWorkedMinutesWeek += employeeWeekMinutes;
+      totalLateCount += employeeLateCount;
+
+      return `
+        <tr style="border-bottom:1px solid #f3f4f6; ${rowIndex % 2 !== 0 ? 'background:#fafafa;' : ''}">
+          <td style="padding:10px 10px; color:#374151; font-size:14px; font-weight:600;">
+            ${escapeHtml(emp.fullName)}
+          </td>
+          ${dayCells}
+          <td style="padding:10px 8px; text-align:center; color:#111827; font-size:13px; font-weight:700;">
+            ${formatMinutesToHours(employeeWeekMinutes)}
+          </td>
+          <td style="padding:10px 8px; text-align:center; color:#111827; font-size:13px; font-weight:700;">
+            ${employeeLateCount}
           </td>
         </tr>
       `;
-      records.forEach(r => {
-        weekRows += `
-          <tr style="border-bottom:1px solid #f3f4f6; ${rowIndex % 2 !== 0 ? 'background:#fafafa;' : ''}">
-            <td style="padding:10px 10px; color:#374151; font-size:14px;">${r.full_name}</td>
-            <td style="padding:10px 10px; text-align:center; color:#374151; font-size:14px;">${r.arrival_time || '—'}</td>
-            <td style="padding:10px 10px; text-align:center; color:${r.departure_time ? '#374151' : '#9ca3af'}; font-size:14px;">${r.departure_time || '—'}</td>
-          </tr>
-        `;
-        rowIndex++;
-      });
-    }
+    }).join('');
 
     const mailOptions = {
       from: {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: ['fethi.chaouachi@avocarbon.com','rami.mejri@avocarbon.com'],
+      to: ['fethi.chaouachi@avocarbon.com', 'rami.mejri@avocarbon.com'],
       subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -610,12 +921,12 @@ async function sendAttendanceReport() {
                 <div style="font-size:12px; color:#6b7280; margin-top:3px;">Présents aujourd'hui</div>
               </div>
               <div style="flex:1; padding:20px; text-align:center; border-right:1px solid #e5e7eb;">
-                <div style="font-size:32px; font-weight:700; color:#1e293b;">${totalPresentWeek}</div>
-                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Présences cette semaine</div>
+                <div style="font-size:32px; font-weight:700; color:#1e293b;">${employeesWithAnyData}</div>
+                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Employés avec données cette semaine</div>
               </div>
               <div style="flex:1; padding:20px; text-align:center;">
                 <div style="font-size:32px; font-weight:700; color:#1e293b;">${totalEmployees}</div>
-                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Total employés</div>
+                <div style="font-size:12px; color:#6b7280; margin-top:3px;">Total employés actifs</div>
               </div>
             </div>
 
@@ -649,33 +960,35 @@ async function sendAttendanceReport() {
                 Résumé hebdomadaire — ${formatDateFR(startDate)} → ${formatDateFR(endDate)}
               </p>
 
-              ${weekData.rows.length > 0 ? `
               <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:24px;">
                 <thead>
                   <tr style="border-bottom:2px solid #1e293b;">
-                    <th style="text-align:left; padding:8px 10px; color:#374151; font-weight:600;">Employé</th>
-                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600;">Arrivée</th>
-                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600;">Départ</th>
+                    <th style="text-align:left; padding:8px 10px; color:#374151; font-weight:600; min-width:180px;">Employé</th>
+                    ${headerDayColumns}
+                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600; min-width:95px;">Total semaine</th>
+                    <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600; min-width:85px;">Nb retards</th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${weekRows}
+                  ${reportRows}
                 </tbody>
               </table>
 
               <!-- SUMMARY -->
               <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:16px 20px; font-size:13px; color:#374151;">
                 <strong style="display:block; margin-bottom:8px; color:#1e293b;">Statistiques</strong>
-                Total présences : <strong>${totalPresentWeek}</strong> &nbsp;•&nbsp;
-                Moyenne/jour : <strong>${avgPerDay} employés</strong> &nbsp;•&nbsp;
-                Jours avec données : <strong>${Object.keys(groupedByDate).length}</strong> &nbsp;•&nbsp;
-                Total employés : <strong>${totalEmployees}</strong>
+                Heures totales semaine : <strong>${formatMinutesToHours(totalWorkedMinutesWeek)}</strong> &nbsp;•&nbsp;
+                Total retards : <strong>${totalLateCount}</strong> &nbsp;•&nbsp;
+                Employés avec données : <strong>${employeesWithAnyData}</strong> &nbsp;•&nbsp;
+                Total employés actifs : <strong>${totalEmployees}</strong>
               </div>
-              ` : `
-              <div style="background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:14px 18px; border-radius:6px; font-size:13px;">
-                ⚠️ Aucune donnée de présence pour cette période
+
+              <div style="margin-top:12px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:14px 18px; font-size:12px; color:#6b7280; line-height:1.6;">
+                <strong style="color:#374151;">Légende :</strong>
+                XhYY (08:12 → 17:11) = heures travaillées après déduction d'1h de pause déjeuner.<br>
+                Autorisation, mission et congé sont pris en compte uniquement si la demande est approuvée.
+                Les retards sont comptés uniquement après 08:30 et ignorés s'ils sont couverts par une autorisation approuvée.
               </div>
-              `}
 
             </div>
 
@@ -1462,9 +1775,7 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
-    // 2. Get only employees where mail_responsable1 = Taha (always uses RESPONSIBLE_EMAIL)
-    // ✅ FIX: Changed CONCAT(nom, ' ', prenom) to CONCAT(prenom, ' ', nom)
-    //    to match the "Firstname Lastname" format stored in the attendance database
+    // 2. Get only employees where mail_responsable1 = Taha
     const employeesResult = await poolHR.query(`
       SELECT 
         CONCAT(prenom, ' ', nom) AS full_name,
@@ -1486,7 +1797,6 @@ async function sendTeamAttendanceReportPerResponsable() {
       employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
     });
 
-    // Debug name matching
     console.log("🔍 [DEBUG] Attendance DB names:", attendanceResult.rows.map(r => r.full_name));
     console.log("🔍 [DEBUG] HR DB employee keys:", Object.keys(employeeMap));
 
@@ -1521,7 +1831,7 @@ async function sendTeamAttendanceReportPerResponsable() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: REPORT_RECIPIENT,  // ← sends to you during testing, change to Taha when done
+      to: REPORT_RECIPIENT,
       subject: `Rapport de Présence Équipe — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -1632,20 +1942,21 @@ app.get('/api/smtp-status', async (req, res) => {
 });
 
 // ==================== CRON JOB ====================
-//try {
-//  const cron = require('node-cron');
+// try {
+//   const cron = require('node-cron');
 
-//  cron.schedule('30 10 * * 1-5', async () => {
-//    console.log("⏰ Running automatic attendance reports...");
-//    await sendAttendanceReport();
-//    await sendTeamAttendanceReportPerResponsable();
-//  }, { timezone: "Africa/Tunis" });
+//   cron.schedule('30 10 * * 1-5', async () => {
+//     console.log("⏰ Running automatic attendance reports...");
+//     await sendAttendanceReport();
+//     await sendTeamAttendanceReportPerResponsable();
+//   }, { timezone: "Africa/Tunis" });
 
- // console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
+//   console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
 
-//} catch (error) {
-//  console.warn("⚠️ Cron scheduling not available:", error.message);
-//}
+// } catch (error) {
+//   console.warn("⚠️ Cron scheduling not available:", error.message);
+// }
+
 // ==================== SERVER START ====================
 
 const PORT = process.env.PORT || 5001;
