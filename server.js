@@ -296,10 +296,23 @@ function computeWorkedMinutes(arrivalTime, departureTime, lunchBreakMinutes = 60
 
 function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const result = [];
-  const start = new Date(`${request.date_depart}T00:00:00`);
-  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
+
+  // FIX 3: autorisation should only affect its actual date, not all days in a range
+  if (request.type_demande === 'autorisation') {
+    const authDate = new Date(`${request.date_depart}T00:00:00`);
+    const day = authDate.getDay();
+
+    if (authDate >= reportStart && authDate <= reportEnd && day >= 1 && day <= 5) {
+      result.push(authDate.toISOString().split('T')[0]);
+    }
+
+    return result;
+  }
+
+  const start = new Date(`${request.date_depart}T00:00:00`);
+  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
 
   const cursor = new Date(start > reportStart ? start : reportStart);
   const finalEnd = end < reportEnd ? end : reportEnd;
@@ -386,8 +399,9 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     let finalMinutes = workedMinutes;
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
+    // FIX 2: authorization time should be subtracted, not added
     if (totalAuthorizationMinutes > 0) {
-      finalMinutes += totalAuthorizationMinutes;
+      finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);
       details += `, autorisation ${formatMinutesToHours(totalAuthorizationMinutes)}`;
     } else if (mission) {
       const missionMinutes = getAuthorizationMinutes(mission);
@@ -415,9 +429,10 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
+  // FIX 2: authorization without attendance should not count as worked minutes
   if (totalAuthorizationMinutes > 0) {
     return {
-      minutes: totalAuthorizationMinutes,
+      minutes: 0,
       text: `${formatMinutesToHours(totalAuthorizationMinutes)} (autorisation)`,
       lateCount: 0
     };
@@ -741,7 +756,7 @@ async function sendAttendanceReport() {
       SELECT id, matricule, nom, prenom
       FROM employees
       WHERE date_depart IS NULL
-        AND COALESCE(statut, 'actif') = 'actif'
+        AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
       ORDER BY nom, prenom
     `);
 
@@ -1037,7 +1052,8 @@ app.get('/api/employees/actifs', async (req, res) => {
               mail_responsable1, mail_responsable2, date_debut,
               date_naissance, cin, salaire_brute
        FROM employees 
-       WHERE date_depart IS NULL 
+       WHERE date_depart IS NULL
+         AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
        ORDER BY nom, prenom`
     );
     console.log(`✅ Récupération ${result.rows.length} employés actifs`);
@@ -1783,6 +1799,7 @@ async function sendTeamAttendanceReportPerResponsable() {
         mail_responsable1
       FROM employees
       WHERE date_depart IS NULL
+        AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
         AND mail_responsable1 = $1
     `, [RESPONSIBLE_EMAIL]);
 
@@ -1945,7 +1962,7 @@ app.get('/api/smtp-status', async (req, res) => {
  try {
    const cron = require('node-cron');
 
-  cron.schedule('30 8 * * 1-5', async () => {
+  cron.schedule('15 9 * * 1-5', async () => {
      console.log("⏰ Running automatic attendance reports...");
      await sendAttendanceReport();
      //await sendTeamAttendanceReportPerResponsable();
