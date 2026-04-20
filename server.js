@@ -299,17 +299,35 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
-  // FIX 3: autorisation should only affect its actual date, not all days in a range
-  if (request.type_demande === 'autorisation') {
-    const authDate = new Date(`${request.date_depart}T00:00:00`);
-    const day = authDate.getDay();
+  // FIX: autorisation and mission should appear only on their actual date
+  if (request.type_demande === 'autorisation' || request.type_demande === 'mission') {
+    const reqDate = new Date(`${request.date_depart}T00:00:00`);
+    const day = reqDate.getDay();
 
-    if (authDate >= reportStart && authDate <= reportEnd && day >= 1 && day <= 5) {
-      result.push(authDate.toISOString().split('T')[0]);
+    if (reqDate >= reportStart && reqDate <= reportEnd && day >= 1 && day <= 5) {
+      result.push(reqDate.toISOString().split('T')[0]);
     }
 
     return result;
   }
+
+  // congés keep the date range logic
+  const start = new Date(`${request.date_depart}T00:00:00`);
+  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
+
+  const cursor = new Date(start > reportStart ? start : reportStart);
+  const finalEnd = end < reportEnd ? end : reportEnd;
+
+  while (cursor <= finalEnd) {
+    const day = cursor.getDay();
+    if (day >= 1 && day <= 5) {
+      result.push(cursor.toISOString().split('T')[0]);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return result;
+}
 
   const start = new Date(`${request.date_depart}T00:00:00`);
   const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
@@ -1962,7 +1980,7 @@ app.get('/api/smtp-status', async (req, res) => {
  try {
    const cron = require('node-cron');
 
-  cron.schedule('15 9 * * 1-5', async () => {
+  cron.schedule('25 9 * * 1-5', async () => {
      console.log("⏰ Running automatic attendance reports...");
      await sendAttendanceReport();
      //await sendTeamAttendanceReportPerResponsable();
