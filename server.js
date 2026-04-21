@@ -1963,7 +1963,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('15 21 * * 1-5', async () => {
+  cron.schedule('05 8 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
