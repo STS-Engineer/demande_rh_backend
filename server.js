@@ -14,6 +14,7 @@ app.use(express.json());
 
 // ==================== DATABASE CONFIGURATION ====================
 
+// HR Database (for employees, demandes_rh, etc.)
 const poolHR = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
@@ -23,6 +24,7 @@ const poolHR = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Attendance Database (same server, different database name)
 const poolAttendance = new Pool({
   user: process.env.DB_USER || 'administrationSTS',
   host: process.env.DB_HOST || 'avo-adb-002.postgres.database.azure.com',
@@ -292,18 +294,12 @@ function computeWorkedMinutes(arrivalTime, departureTime, lunchBreakMinutes = 60
   return Math.max(0, raw - lunchBreakMinutes);
 }
 
-// ==================== BUG 2 FIX ====================
-// BEFORE: There was a duplicate orphaned code block after the closing brace of
-// getRequestDatesInRange that caused the congé date-range logic to run at module
-// level, corrupting scope and making leave/mission/authorization bleed onto wrong days.
-// FIX: Removed the stray duplicate block entirely. The function is now clean and
-// self-contained, so each request type maps only to its correct date(s).
 function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const result = [];
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
-  // autorisation and mission appear only on their actual single date
+  // FIX: autorisation and mission should appear only on their actual date
   if (request.type_demande === 'autorisation' || request.type_demande === 'mission') {
     const reqDate = new Date(`${request.date_depart}T00:00:00`);
     const day = reqDate.getDay();
@@ -332,7 +328,23 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
 
   return result;
 }
-// =====================================================
+
+  const start = new Date(`${request.date_depart}T00:00:00`);
+  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
+
+  const cursor = new Date(start > reportStart ? start : reportStart);
+  const finalEnd = end < reportEnd ? end : reportEnd;
+
+  while (cursor <= finalEnd) {
+    const day = cursor.getDay();
+    if (day >= 1 && day <= 5) {
+      result.push(cursor.toISOString().split('T')[0]);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return result;
+}
 
 function buildApprovedRequestMap(requestRows, startDateStr, endDateStr) {
   const map = new Map();
@@ -402,14 +414,10 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     const lateJustified = getLateJustified(arrival, requestsForDay);
     const isLate = toMinutesFromTime(arrival) !== null && toMinutesFromTime(arrival) > (8 * 60 + 30) && !lateJustified;
 
-    // BUG 3 FIX:
-    // BEFORE: authorization minutes were added to worked hours (+= totalAuthorizationMinutes),
-    // which inflated the total. Authorizations are absences within the workday, so they must
-    // be subtracted from the clocked hours to get the actual productive time.
-    // FIX: subtract authorization minutes from worked minutes (already capped at 0 minimum).
     let finalMinutes = workedMinutes;
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
+    // FIX 2: authorization time should be subtracted, not added
     if (totalAuthorizationMinutes > 0) {
       finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);
       details += `, autorisation ${formatMinutesToHours(totalAuthorizationMinutes)}`;
@@ -430,33 +438,16 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
-  // BUG 1 FIX:
-  // BEFORE: any attendanceRow that had arrival but no departure (morning-only scan)
-  // fell into this branch and displayed "sortie manquante", even mid-day when the
-  // employee simply hasn't left yet.
-  // FIX: only show "sortie manquante" when BOTH arrival AND departure are missing
-  // but the row exists (truly incomplete record). When only arrival is present,
-  // show the arrival time with a pending marker instead of an error label.
-  if (attendanceRow) {
-    if (arrival && !departure) {
-      // Employee has arrived but not yet left — show arrival only, no false error
-      return {
-        minutes: 0,
-        text: `${formatTimeHHMM(arrival)} → en cours`,
-        lateCount: 0
-      };
-    }
-    if (!arrival && departure) {
-      // Departure recorded but no arrival — genuinely incomplete
-      return {
-        minutes: 0,
-        text: `entrée manquante → ${formatTimeHHMM(departure)}`,
-        lateCount: 0
-      };
-    }
+  if (attendanceRow && (arrival || departure)) {
+    const partialText = `${arrival ? formatTimeHHMM(arrival) : 'entrée manquante'} → ${departure ? formatTimeHHMM(departure) : 'sortie manquante'}`;
+    return {
+      minutes: 0,
+      text: `— (${partialText})`,
+      lateCount: 0
+    };
   }
 
-  // authorization without attendance should not count as worked minutes
+  // FIX 2: authorization without attendance should not count as worked minutes
   if (totalAuthorizationMinutes > 0) {
     return {
       minutes: 0,
@@ -497,7 +488,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-// ==================== ADVISORY LOCK FUNCTIONS ====================
+// ==================== ADVISORY LOCK FUNCTIONS (prevents duplicate emails on Azure multi-instance) ====================
 
 const acquireJobLock = async (lockId) => {
   const instanceId = process.env.WEBSITE_INSTANCE_ID || `instance_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1028,7 +1019,6 @@ async function sendAttendanceReport() {
               <div style="margin-top:12px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:14px 18px; font-size:12px; color:#6b7280; line-height:1.6;">
                 <strong style="color:#374151;">Légende :</strong>
                 XhYY (08:12 → 17:11) = heures travaillées après déduction d'1h de pause déjeuner.<br>
-                "en cours" = employé arrivé, départ non encore enregistré.<br>
                 Autorisation, mission et congé sont pris en compte uniquement si la demande est approuvée.
                 Les retards sont comptés uniquement après 08:30 et ignorés s'ils sont couverts par une autorisation approuvée.
               </div>
@@ -1059,7 +1049,7 @@ async function sendAttendanceReport() {
   }
 }
 
-// Manual trigger endpoint
+// Manual trigger endpoint — calls BOTH functions
 app.post('/api/attendance/send-report', async (req, res) => {
   try {
     await sendAttendanceReport();
@@ -1799,9 +1789,14 @@ async function sendTeamAttendanceReportPerResponsable() {
 
     const todayStr = today.toISOString().split('T')[0];
 
+    // RESPONSIBLE_EMAIL: always Taha's real email — used ONLY for the DB query
     const RESPONSIBLE_EMAIL = 'taha.khiari@avocarbon.com';
+
+    // ⚠️ TESTING: email is sent to rami.mejri instead of Taha
+    // When done testing, change REPORT_RECIPIENT to: 'taha.khiari@avocarbon.com'
     const REPORT_RECIPIENT = 'taha.khiari@avocarbon.com';
 
+    // 1. Get today's attendance from attendance DB
     const attendanceResult = await poolAttendance.query(`
       SELECT full_name, arrival_time, departure_time
       FROM attendance_daily
@@ -1814,6 +1809,7 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
+    // 2. Get only employees where mail_responsable1 = Taha
     const employeesResult = await poolHR.query(`
       SELECT 
         CONCAT(prenom, ' ', nom) AS full_name,
@@ -1830,11 +1826,16 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
+    // 3. Build a map: full_name (lowercase) => poste
     const employeeMap = {};
     employeesResult.rows.forEach(emp => {
       employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
     });
 
+    console.log("🔍 [DEBUG] Attendance DB names:", attendanceResult.rows.map(r => r.full_name));
+    console.log("🔍 [DEBUG] HR DB employee keys:", Object.keys(employeeMap));
+
+    // 4. Filter attendance to only Taha's team
     const teamRecords = attendanceResult.rows
       .filter(record => employeeMap[record.full_name.trim().toLowerCase()])
       .map(record => ({
@@ -1843,6 +1844,8 @@ async function sendTeamAttendanceReportPerResponsable() {
         arrival_time: record.arrival_time || '—',
         departure_time: record.departure_time || '—'
       }));
+
+    console.log(`🔍 [DEBUG] teamRecords matched: ${teamRecords.length}`);
 
     if (teamRecords.length === 0) {
       console.log("No team members present today — skipping team report email");
@@ -1870,7 +1873,10 @@ async function sendTeamAttendanceReportPerResponsable() {
         <html lang="fr">
         <head><meta charset="UTF-8"></head>
         <body style="margin:0; padding:30px 20px; background:#f4f4f4; font-family: Arial, sans-serif;">
+
           <div style="width:100%; background:#ffffff; border:1px solid #ddd; border-radius:6px; overflow:hidden;">
+
+            <!-- HEADER -->
             <div style="background:#2d4a6e; padding:24px 32px;">
               <p style="margin:0; color:#94a3b8; font-size:12px; text-transform:uppercase; letter-spacing:1px;">Administration STS</p>
               <h1 style="margin:6px 0 0; color:#ffffff; font-size:20px; font-weight:700;">Rapport de Présence — Votre Équipe</h1>
@@ -1879,14 +1885,19 @@ async function sendTeamAttendanceReportPerResponsable() {
                 — ${today.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
               </p>
             </div>
+
+            <!-- STATS -->
             <div style="border-bottom:1px solid #e5e7eb; padding:20px 32px; background:#f9fafb;">
               <span style="font-size:28px; font-weight:700; color:#1e293b;">${teamRecords.length}</span>
               <span style="font-size:13px; color:#6b7280; margin-left:8px;">membre(s) présent(s) aujourd'hui</span>
             </div>
+
+            <!-- TABLE -->
             <div style="padding:28px 32px;">
               <p style="margin:0 0 12px; font-size:13px; font-weight:700; color:#1e293b; text-transform:uppercase; letter-spacing:0.5px;">
                 Arrivées du jour — ${formatDateFR(todayStr)}
               </p>
+
               <table style="width:100%; border-collapse:collapse; font-size:14px;">
                 <thead>
                   <tr style="border-bottom:2px solid #1e293b;">
@@ -1896,15 +1907,21 @@ async function sendTeamAttendanceReportPerResponsable() {
                     <th style="text-align:center; padding:8px 10px; color:#374151; font-weight:600;">Départ</th>
                   </tr>
                 </thead>
-                <tbody>${rows}</tbody>
+                <tbody>
+                  ${rows}
+                </tbody>
               </table>
             </div>
+
+            <!-- FOOTER -->
             <div style="background:#f9fafb; border-top:1px solid #e5e7eb; padding:16px 32px; text-align:center;">
               <p style="margin:0; font-size:12px; color:#9ca3af;">
                 Rapport automatique — Système RH STS &nbsp;•&nbsp; ${formatDateFR(today)} à ${today.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
               </p>
             </div>
+
           </div>
+
         </body>
         </html>
       `
@@ -1960,20 +1977,20 @@ app.get('/api/smtp-status', async (req, res) => {
 });
 
 // ==================== CRON JOB ====================
-try {
-  const cron = require('node-cron');
+ try {
+   const cron = require('node-cron');
 
-  cron.schedule('05 8 * * 1-5', async () => {
-    console.log("⏰ Running automatic attendance reports...");
-    await sendAttendanceReport();
-    //await sendTeamAttendanceReportPerResponsable();
-  }, { timezone: "Africa/Tunis" });
+  cron.schedule('45 8 * * 1-5', async () => {
+     console.log("⏰ Running automatic attendance reports...");
+     await sendAttendanceReport();
+     //await sendTeamAttendanceReportPerResponsable();
+   }, { timezone: "Africa/Tunis" });
 
-  console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
+   console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
 
-} catch (error) {
-  console.warn("⚠️ Cron scheduling not available:", error.message);
-}
+ } catch (error) {
+   console.warn("⚠️ Cron scheduling not available:", error.message);
+ }
 
 // ==================== SERVER START ====================
 
@@ -2000,4 +2017,4 @@ app.listen(PORT, async () => {
 
   try { await fs.access(TEMPLATE_SALAIRE_PATH); console.log('✅ Template attestation salaire trouvé'); }
   catch { console.warn('⚠️ Template attestation salaire non trouvé'); }
-});
+})
