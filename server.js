@@ -296,41 +296,10 @@ function computeWorkedMinutes(arrivalTime, departureTime, lunchBreakMinutes = 60
 
 function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const result = [];
+  const start = new Date(`${request.date_depart}T00:00:00`);
+  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
-
-  // FIX: autorisation and mission should appear only on their actual date
-  if (request.type_demande === 'autorisation' || request.type_demande === 'mission') {
-    const reqDate = new Date(`${request.date_depart}T00:00:00`);
-    const day = reqDate.getDay();
-
-    if (reqDate >= reportStart && reqDate <= reportEnd && day >= 1 && day <= 5) {
-      result.push(reqDate.toISOString().split('T')[0]);
-    }
-
-    return result;
-  }
-
-  // congés keep the date range logic
-  const start = new Date(`${request.date_depart}T00:00:00`);
-  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
-
-  const cursor = new Date(start > reportStart ? start : reportStart);
-  const finalEnd = end < reportEnd ? end : reportEnd;
-
-  while (cursor <= finalEnd) {
-    const day = cursor.getDay();
-    if (day >= 1 && day <= 5) {
-      result.push(cursor.toISOString().split('T')[0]);
-    }
-    cursor.setDate(cursor.getDate() + 1);
-  }
-
-  return result;
-}
-
-  const start = new Date(`${request.date_depart}T00:00:00`);
-  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
 
   const cursor = new Date(start > reportStart ? start : reportStart);
   const finalEnd = end < reportEnd ? end : reportEnd;
@@ -417,9 +386,8 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     let finalMinutes = workedMinutes;
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
-    // FIX 2: authorization time should be subtracted, not added
     if (totalAuthorizationMinutes > 0) {
-      finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);
+      finalMinutes += totalAuthorizationMinutes;
       details += `, autorisation ${formatMinutesToHours(totalAuthorizationMinutes)}`;
     } else if (mission) {
       const missionMinutes = getAuthorizationMinutes(mission);
@@ -447,10 +415,9 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
-  // FIX 2: authorization without attendance should not count as worked minutes
   if (totalAuthorizationMinutes > 0) {
     return {
-      minutes: 0,
+      minutes: totalAuthorizationMinutes,
       text: `${formatMinutesToHours(totalAuthorizationMinutes)} (autorisation)`,
       lateCount: 0
     };
@@ -774,7 +741,7 @@ async function sendAttendanceReport() {
       SELECT id, matricule, nom, prenom
       FROM employees
       WHERE date_depart IS NULL
-        AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
+        AND COALESCE(statut, 'actif') = 'actif'
       ORDER BY nom, prenom
     `);
 
@@ -1070,8 +1037,7 @@ app.get('/api/employees/actifs', async (req, res) => {
               mail_responsable1, mail_responsable2, date_debut,
               date_naissance, cin, salaire_brute
        FROM employees 
-       WHERE date_depart IS NULL
-         AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
+       WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
     );
     console.log(`✅ Récupération ${result.rows.length} employés actifs`);
@@ -1817,7 +1783,6 @@ async function sendTeamAttendanceReportPerResponsable() {
         mail_responsable1
       FROM employees
       WHERE date_depart IS NULL
-        AND COALESCE(LOWER(BTRIM(statut)), 'actif') NOT IN ('archive', 'archived', 'archivé')
         AND mail_responsable1 = $1
     `, [RESPONSIBLE_EMAIL]);
 
@@ -1980,7 +1945,7 @@ app.get('/api/smtp-status', async (req, res) => {
  try {
    const cron = require('node-cron');
 
-  cron.schedule('15 11 * * 1-5', async () => {
+  cron.schedule('30 8 * * 1-5', async () => {
      console.log("⏰ Running automatic attendance reports...");
      await sendAttendanceReport();
      //await sendTeamAttendanceReportPerResponsable();
@@ -2017,4 +1982,4 @@ app.listen(PORT, async () => {
 
   try { await fs.access(TEMPLATE_SALAIRE_PATH); console.log('✅ Template attestation salaire trouvé'); }
   catch { console.warn('⚠️ Template attestation salaire non trouvé'); }
-})
+});
