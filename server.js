@@ -309,11 +309,20 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
-  const requestStart = new Date(`${request.date_depart}T00:00:00`);
-  
-  // ✅ FIX: date_retour is the LAST day of absence (inclusive), not the return day
-  const requestEnd = request.date_retour
-    ? new Date(`${request.date_retour}T00:00:00`)
+  // ✅ SAFE: extract just the date string from whatever PostgreSQL returns
+  const departStr = request.date_depart instanceof Date
+    ? request.date_depart.toISOString().split('T')[0]
+    : String(request.date_depart).split('T')[0];
+
+  const retourStr = request.date_retour
+    ? (request.date_retour instanceof Date
+        ? request.date_retour.toISOString().split('T')[0]
+        : String(request.date_retour).split('T')[0])
+    : null;
+
+  const requestStart = new Date(`${departStr}T00:00:00`);
+  const requestEnd = retourStr
+    ? new Date(`${retourStr}T00:00:00`)
     : new Date(requestStart);
 
   // AUTORISATION = single day only
@@ -327,9 +336,11 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
     return result;
   }
 
-  // MISSION + CONGE = inclusive date range
+  // MISSION + CONGE = inclusive range
   const start = requestStart > reportStart ? requestStart : reportStart;
   const end = requestEnd < reportEnd ? requestEnd : reportEnd;
+
+  if (start > end) return result;
 
   const cursor = new Date(start);
   while (cursor <= end) {
@@ -342,7 +353,6 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
 
   return result;
 }
-
 function buildApprovedRequestMap(requestRows, startDateStr, endDateStr) {
   const map = new Map();
 
@@ -1973,7 +1983,7 @@ app.get('/api/smtp-status', async (req, res) => {
  try {
    const cron = require('node-cron');
 
-  cron.schedule('03 12 * * 1-5', async () => {
+  cron.schedule('33 12 * * 1-5', async () => {
      console.log("⏰ Running automatic attendance reports...");
      await sendAttendanceReport();
      //await sendTeamAttendanceReportPerResponsable();
