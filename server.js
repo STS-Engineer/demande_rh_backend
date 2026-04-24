@@ -294,17 +294,51 @@ function computeWorkedMinutes(arrivalTime, departureTime, lunchBreakMinutes = 60
   return Math.max(0, raw - lunchBreakMinutes);
 }
 
+function normalizeTypeDemande(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const result = [];
-  const start = new Date(`${request.date_depart}T00:00:00`);
-  const end = new Date(`${(request.date_retour || request.date_depart)}T00:00:00`);
+
+  const type = normalizeTypeDemande(request.type_demande);
+
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
-  const cursor = new Date(start > reportStart ? start : reportStart);
-  const finalEnd = end < reportEnd ? end : reportEnd;
+  const requestStart = new Date(`${request.date_depart}T00:00:00`);
+  const requestEndRaw = request.date_retour
+    ? new Date(`${request.date_retour}T00:00:00`)
+    : requestStart;
 
-  while (cursor <= finalEnd) {
+  // 🔴 KEY FIX: treat date_retour as RETURN DAY → exclude it
+  const requestEnd = new Date(requestEndRaw);
+  if (request.date_retour) {
+    requestEnd.setDate(requestEnd.getDate() - 1);
+  }
+
+  // ✅ AUTORISATION = ONLY ONE DAY
+  if (type === 'autorisation') {
+    if (requestStart >= reportStart && requestStart <= reportEnd) {
+      const day = requestStart.getDay();
+      if (day >= 1 && day <= 5) {
+        result.push(requestStart.toISOString().split('T')[0]);
+      }
+    }
+    return result;
+  }
+
+  // ✅ MISSION + CONGE = RANGE (but correct range)
+  const start = requestStart > reportStart ? requestStart : reportStart;
+  const end = requestEnd < reportEnd ? requestEnd : reportEnd;
+
+  const cursor = new Date(start);
+
+  while (cursor <= end) {
     const day = cursor.getDay();
     if (day >= 1 && day <= 5) {
       result.push(cursor.toISOString().split('T')[0]);
@@ -1945,7 +1979,7 @@ app.get('/api/smtp-status', async (req, res) => {
  try {
    const cron = require('node-cron');
 
-  cron.schedule('30 8 * * 1-5', async () => {
+  cron.schedule('35 11 * * 1-5', async () => {
      console.log("⏰ Running automatic attendance reports...");
      await sendAttendanceReport();
      //await sendTeamAttendanceReportPerResponsable();
