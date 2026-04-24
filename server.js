@@ -304,24 +304,19 @@ function normalizeTypeDemande(value) {
 
 function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const result = [];
-
   const type = normalizeTypeDemande(request.type_demande);
 
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
   const requestStart = new Date(`${request.date_depart}T00:00:00`);
-  const requestEndRaw = request.date_retour
+  
+  // ✅ FIX: date_retour is the LAST day of absence (inclusive), not the return day
+  const requestEnd = request.date_retour
     ? new Date(`${request.date_retour}T00:00:00`)
-    : requestStart;
+    : new Date(requestStart);
 
-  // 🔴 KEY FIX: treat date_retour as RETURN DAY → exclude it
-  const requestEnd = new Date(requestEndRaw);
-  if (request.date_retour) {
-    requestEnd.setDate(requestEnd.getDate() - 1);
-  }
-
-  // ✅ AUTORISATION = ONLY ONE DAY
+  // AUTORISATION = single day only
   if (type === 'autorisation') {
     if (requestStart >= reportStart && requestStart <= reportEnd) {
       const day = requestStart.getDay();
@@ -332,12 +327,11 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
     return result;
   }
 
-  // ✅ MISSION + CONGE = RANGE (but correct range)
+  // MISSION + CONGE = inclusive date range
   const start = requestStart > reportStart ? requestStart : reportStart;
   const end = requestEnd < reportEnd ? requestEnd : reportEnd;
 
   const cursor = new Date(start);
-
   while (cursor <= end) {
     const day = cursor.getDay();
     if (day >= 1 && day <= 5) {
