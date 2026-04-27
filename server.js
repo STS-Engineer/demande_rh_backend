@@ -921,7 +921,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: ['rami.mejri@avocarbon.com'],
+      to: ['fethi.chaouachi@avocarbon.com','rami.mejri@avocarbon.com'],
       subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -1967,7 +1967,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('45 12 * * 1-5', async () => {
+  cron.schedule('00 10 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
