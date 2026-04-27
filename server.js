@@ -353,6 +353,7 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
 
   return result;
 }
+
 function buildApprovedRequestMap(requestRows, startDateStr, endDateStr) {
   const map = new Map();
 
@@ -393,45 +394,45 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
   const autorisations = requestsForDay.filter(r => r.type_demande === 'autorisation');
   const mission = requestsForDay.find(r => r.type_demande === 'mission');
 
+  // ── CONGÉ ──────────────────────────────────────────────────────────────────
   if (conge) {
     if (conge.demi_journee) {
-      return {
-        minutes: 240,
-        text: '4h00 (congé 1/2 journée)',
-        lateCount: 0
-      };
+      return { minutes: 240, text: '4h00 (congé 1/2 journée)', lateCount: 0 };
     }
-    return {
-      minutes: 0,
-      text: 'Congé',
-      lateCount: 0
-    };
+    return { minutes: 0, text: 'Congé', lateCount: 0 };
   }
 
   const arrival = attendanceRow?.arrival_time || null;
   const departure = attendanceRow?.departure_time || null;
   const workedMinutes = computeWorkedMinutes(arrival, departure, 60);
 
+  // Total absence time from autorisations (personal absence → must be SUBTRACTED)
   const totalAuthorizationMinutes = autorisations.reduce((sum, req) => {
     const m = getAuthorizationMinutes(req);
     return sum + (m || 0);
   }, 0);
 
+  // ── HAS ATTENDANCE RECORD WITH BOTH ARRIVAL AND DEPARTURE ─────────────────
   if (attendanceRow && workedMinutes !== null) {
     const lateJustified = getLateJustified(arrival, requestsForDay);
-    const isLate = toMinutesFromTime(arrival) !== null && toMinutesFromTime(arrival) > (8 * 60 + 30) && !lateJustified;
+    const isLate = toMinutesFromTime(arrival) !== null
+      && toMinutesFromTime(arrival) > (8 * 60 + 30)
+      && !lateJustified;
 
     let finalMinutes = workedMinutes;
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
     if (totalAuthorizationMinutes > 0) {
-  finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);  // ✅ subtracting
-  details += `, autorisation -${formatMinutesToHours(totalAuthorizationMinutes)}`;
+      // ✅ FIX: autorisation = personal absence → SUBTRACT from worked hours
+      finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);
+      details += `, autorisation -${formatMinutesToHours(totalAuthorizationMinutes)}`;
     } else if (mission) {
+      // ✅ FIX: partial day mission (has clock-in/out) → add mission hours, subtract lunch
       const missionMinutes = getAuthorizationMinutes(mission);
       if (missionMinutes) {
-        finalMinutes += missionMinutes;
-        details += `, mission ${formatMinutesToHours(missionMinutes)}`;
+        // Employee was also at office + on mission: add mission time, deduct lunch once
+        finalMinutes = Math.max(0, workedMinutes + missionMinutes - 60);
+        details += `, mission +${formatMinutesToHours(missionMinutes)} -1h pause`;
       } else {
         details += ', mission';
       }
@@ -444,15 +445,15 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
+  // ── PARTIAL RECORD (only arrival OR only departure) ────────────────────────
   if (attendanceRow && (arrival || departure)) {
     const partialText = `${arrival ? formatTimeHHMM(arrival) : 'entrée manquante'} → ${departure ? formatTimeHHMM(departure) : 'sortie manquante'}`;
-    return {
-      minutes: 0,
-      text: `— (${partialText})`,
-      lateCount: 0
-    };
+    return { minutes: 0, text: `— (${partialText})`, lateCount: 0 };
   }
 
+  // ── NO ATTENDANCE RECORD ───────────────────────────────────────────────────
+
+  // Autorisation only (no badge) → count the autorisation duration
   if (totalAuthorizationMinutes > 0) {
     return {
       minutes: totalAuthorizationMinutes,
@@ -461,27 +462,17 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
+  // ✅ FIX: Mission with no attendance record = full day mission → fixed 8h
   if (mission) {
-    const missionMinutes = getAuthorizationMinutes(mission);
-    if (missionMinutes) {
-      return {
-        minutes: missionMinutes,
-        text: `${formatMinutesToHours(missionMinutes)} (mission)`,
-        lateCount: 0
-      };
-    }
     return {
-      minutes: 0,
-      text: 'Mission',
+      minutes: 480,
+      text: '8h00 (mission journée complète)',
       lateCount: 0
     };
   }
 
-  return {
-    minutes: 0,
-    text: '—',
-    lateCount: 0
-  };
+  // Nothing at all
+  return { minutes: 0, text: '—', lateCount: 0 };
 }
 
 function escapeHtml(value) {
@@ -1024,7 +1015,8 @@ async function sendAttendanceReport() {
               <div style="margin-top:12px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:14px 18px; font-size:12px; color:#6b7280; line-height:1.6;">
                 <strong style="color:#374151;">Légende :</strong>
                 XhYY (08:12 → 17:11) = heures travaillées après déduction d'1h de pause déjeuner.<br>
-                Autorisation, mission et congé sont pris en compte uniquement si la demande est approuvée.
+                Autorisation = absence personnelle déduite des heures travaillées.<br>
+                Mission journée complète (sans pointage) = 8h fixes. Mission partielle (avec pointage) = heures réelles + heures mission - 1h pause.<br>
                 Les retards sont comptés uniquement après 08:30 et ignorés s'ils sont couverts par une autorisation approuvée.
               </div>
 
@@ -1793,14 +1785,9 @@ async function sendTeamAttendanceReportPerResponsable() {
 
     const todayStr = today.toISOString().split('T')[0];
 
-    // RESPONSIBLE_EMAIL: always Taha's real email — used ONLY for the DB query
     const RESPONSIBLE_EMAIL = 'taha.khiari@avocarbon.com';
-
-    // ⚠️ TESTING: email is sent to rami.mejri instead of Taha
-    // When done testing, change REPORT_RECIPIENT to: 'taha.khiari@avocarbon.com'
     const REPORT_RECIPIENT = 'taha.khiari@avocarbon.com';
 
-    // 1. Get today's attendance from attendance DB
     const attendanceResult = await poolAttendance.query(`
       SELECT full_name, arrival_time, departure_time
       FROM attendance_daily
@@ -1813,7 +1800,6 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
-    // 2. Get only employees where mail_responsable1 = Taha
     const employeesResult = await poolHR.query(`
       SELECT 
         CONCAT(prenom, ' ', nom) AS full_name,
@@ -1829,7 +1815,6 @@ async function sendTeamAttendanceReportPerResponsable() {
       return;
     }
 
-    // 3. Build a map: full_name (lowercase) => poste
     const employeeMap = {};
     employeesResult.rows.forEach(emp => {
       employeeMap[emp.full_name.trim().toLowerCase()] = emp.poste || '—';
@@ -1838,7 +1823,6 @@ async function sendTeamAttendanceReportPerResponsable() {
     console.log("🔍 [DEBUG] Attendance DB names:", attendanceResult.rows.map(r => r.full_name));
     console.log("🔍 [DEBUG] HR DB employee keys:", Object.keys(employeeMap));
 
-    // 4. Filter attendance to only Taha's team
     const teamRecords = attendanceResult.rows
       .filter(record => employeeMap[record.full_name.trim().toLowerCase()])
       .map(record => ({
@@ -1980,20 +1964,20 @@ app.get('/api/smtp-status', async (req, res) => {
 });
 
 // ==================== CRON JOB ====================
- try {
-   const cron = require('node-cron');
+try {
+  const cron = require('node-cron');
 
-  cron.schedule('06 12 * * 1-5', async () => {
-     console.log("⏰ Running automatic attendance reports...");
-     await sendAttendanceReport();
-     //await sendTeamAttendanceReportPerResponsable();
-   }, { timezone: "Africa/Tunis" });
+  cron.schedule('45 12 * * 1-5', async () => {
+    console.log("⏰ Running automatic attendance reports...");
+    await sendAttendanceReport();
+    //await sendTeamAttendanceReportPerResponsable();
+  }, { timezone: "Africa/Tunis" });
 
-   console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
+  console.log("✅ Attendance reports scheduled for weekdays at 10:00 AM Tunisia time");
 
- } catch (error) {
-   console.warn("⚠️ Cron scheduling not available:", error.message);
- }
+} catch (error) {
+  console.warn("⚠️ Cron scheduling not available:", error.message);
+}
 
 // ==================== SERVER START ====================
 
