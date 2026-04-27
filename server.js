@@ -425,8 +425,8 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
     if (totalAuthorizationMinutes > 0) {
-      finalMinutes += totalAuthorizationMinutes;
-      details += `, autorisation ${formatMinutesToHours(totalAuthorizationMinutes)}`;
+  finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);  // ✅ subtracting
+  details += `, autorisation -${formatMinutesToHours(totalAuthorizationMinutes)}`;
     } else if (mission) {
       const missionMinutes = getAuthorizationMinutes(mission);
       if (missionMinutes) {
