@@ -336,9 +336,14 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
     return result;
   }
 
-  // MISSION + CONGE = inclusive range
+  // CONGE: date_retour is the day the employee is BACK at work → exclude it.
+  // MISSION: date_retour is the last day of the mission → keep inclusive.
+  const adjustedRequestEnd = (type === 'conges' && requestEnd > requestStart)
+    ? new Date(requestEnd.getTime() - 24 * 60 * 60 * 1000)  // subtract one day
+    : requestEnd;
+
   const start = requestStart > reportStart ? requestStart : reportStart;
-  const end = requestEnd < reportEnd ? requestEnd : reportEnd;
+  const end = adjustedRequestEnd < reportEnd ? adjustedRequestEnd : reportEnd;
 
   if (start > end) return result;
 
@@ -380,6 +385,9 @@ function getLateJustified(arrivalTime, requestsForDay, lateThresholdMinutes = 8 
   const arrival = toMinutesFromTime(arrivalTime);
   if (arrival === null || arrival <= lateThresholdMinutes) return false;
 
+  // If arrival is after 13:00 it is treated as a departure, not a real arrival — never "justified late"
+  if (arrival >= 13 * 60) return false;
+
   return requestsForDay.some(req => {
     if (req.type_demande !== 'autorisation') return false;
     const start = toMinutesFromTime(req.heure_depart);
@@ -413,10 +421,22 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
   }, 0);
 
   // ── HAS ATTENDANCE RECORD WITH BOTH ARRIVAL AND DEPARTURE ─────────────────
+  // If the only recorded time is after 13:00 it is almost certainly a departure stamp
+  // recorded in the arrival column — treat as missing-arrival / incomplete record.
+  const arrivalMinutes = toMinutesFromTime(arrival);
+  if (attendanceRow && arrivalMinutes !== null && arrivalMinutes >= 13 * 60 && departure === null) {
+    return {
+      minutes: 0,
+      text: `— (entrée manquante, sortie probable : ${formatTimeHHMM(arrival)})`,
+      lateCount: 0
+    };
+  }
+
   if (attendanceRow && workedMinutes !== null) {
     const lateJustified = getLateJustified(arrival, requestsForDay);
-    const isLate = toMinutesFromTime(arrival) !== null
-      && toMinutesFromTime(arrival) > (8 * 60 + 30)
+    const isLate = arrivalMinutes !== null
+      && arrivalMinutes > (8 * 60 + 30)
+      && arrivalMinutes < 13 * 60   // > 13:00 is departure, not arrival → never late
       && !lateJustified;
 
     let finalMinutes = workedMinutes;
@@ -1017,7 +1037,8 @@ async function sendAttendanceReport() {
                 XhYY (08:12 → 17:11) = heures travaillées après déduction d'1h de pause déjeuner.<br>
                 Autorisation = absence personnelle déduite des heures travaillées.<br>
                 Mission journée complète (sans pointage) = 8h fixes. Mission partielle (avec pointage) = heures réelles + heures mission - 1h pause.<br>
-                Les retards sont comptés uniquement après 08:30 et ignorés s'ils sont couverts par une autorisation approuvée.
+                Les retards sont comptés uniquement après 08:30 et ignorés s'ils sont couverts par une autorisation approuvée.<br>
+                Entrée manquante = pointage unique après 13h00 (probablement une sortie enregistrée dans le champ arrivée).
               </div>
 
             </div>
@@ -1967,7 +1988,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('10 11 * * 1-5', async () => {
+  cron.schedule('17 12 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
