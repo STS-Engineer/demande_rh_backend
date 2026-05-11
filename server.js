@@ -9,7 +9,20 @@ const PDFDocument = require('pdfkit');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// ==================== CORS FIX ====================
+app.use(cors({
+  origin: [
+    'https://request-rh.azurewebsites.net',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+app.options('*', cors());
+// ===================================================
+
 app.use(express.json());
 
 // ==================== DATABASE CONFIGURATION ====================
@@ -309,7 +322,6 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
   const reportStart = new Date(`${startDateStr}T00:00:00`);
   const reportEnd = new Date(`${endDateStr}T00:00:00`);
 
-  // ✅ SAFE: extract just the date string from whatever PostgreSQL returns
   const departStr = request.date_depart instanceof Date
     ? request.date_depart.toISOString().split('T')[0]
     : String(request.date_depart).split('T')[0];
@@ -325,7 +337,6 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
     ? new Date(`${retourStr}T00:00:00`)
     : new Date(requestStart);
 
-  // AUTORISATION = single day only
   if (type === 'autorisation') {
     if (requestStart >= reportStart && requestStart <= reportEnd) {
       const day = requestStart.getDay();
@@ -336,10 +347,8 @@ function getRequestDatesInRange(request, startDateStr, endDateStr) {
     return result;
   }
 
-  // CONGE: date_retour is the day the employee is BACK at work → exclude it.
-  // MISSION: date_retour is the last day of the mission → keep inclusive.
   const adjustedRequestEnd = (type === 'conges' && requestEnd > requestStart)
-    ? new Date(requestEnd.getTime() - 24 * 60 * 60 * 1000)  // subtract one day
+    ? new Date(requestEnd.getTime() - 24 * 60 * 60 * 1000)
     : requestEnd;
 
   const start = requestStart > reportStart ? requestStart : reportStart;
@@ -385,7 +394,6 @@ function getLateJustified(arrivalTime, requestsForDay, lateThresholdMinutes = 8 
   const arrival = toMinutesFromTime(arrivalTime);
   if (arrival === null || arrival <= lateThresholdMinutes) return false;
 
-  // If arrival is after 13:00 it is treated as a departure, not a real arrival — never "justified late"
   if (arrival >= 13 * 60) return false;
 
   return requestsForDay.some(req => {
@@ -402,7 +410,6 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
   const autorisations = requestsForDay.filter(r => r.type_demande === 'autorisation');
   const mission = requestsForDay.find(r => r.type_demande === 'mission');
 
-  // ── CONGÉ ──────────────────────────────────────────────────────────────────
   if (conge) {
     if (conge.demi_journee) {
       return { minutes: 240, text: '4h00 (congé 1/2 journée)', lateCount: 0 };
@@ -414,15 +421,11 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
   const departure = attendanceRow?.departure_time || null;
   const workedMinutes = computeWorkedMinutes(arrival, departure, 60);
 
-  // Total absence time from autorisations (personal absence → must be SUBTRACTED)
   const totalAuthorizationMinutes = autorisations.reduce((sum, req) => {
     const m = getAuthorizationMinutes(req);
     return sum + (m || 0);
   }, 0);
 
-  // ── HAS ATTENDANCE RECORD WITH BOTH ARRIVAL AND DEPARTURE ─────────────────
-  // If the only recorded time is after 13:00 it is almost certainly a departure stamp
-  // recorded in the arrival column — treat as missing-arrival / incomplete record.
   const arrivalMinutes = toMinutesFromTime(arrival);
   if (attendanceRow && arrivalMinutes !== null && arrivalMinutes >= 13 * 60 && departure === null) {
     return {
@@ -436,21 +439,18 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     const lateJustified = getLateJustified(arrival, requestsForDay);
     const isLate = arrivalMinutes !== null
       && arrivalMinutes > (8 * 60 + 30)
-      && arrivalMinutes < 13 * 60   // > 13:00 is departure, not arrival → never late
+      && arrivalMinutes < 13 * 60
       && !lateJustified;
 
     let finalMinutes = workedMinutes;
     let details = `${formatTimeHHMM(arrival)} → ${formatTimeHHMM(departure)}`;
 
     if (totalAuthorizationMinutes > 0) {
-      // ✅ FIX: autorisation = personal absence → SUBTRACT from worked hours
       finalMinutes = Math.max(0, finalMinutes - totalAuthorizationMinutes);
       details += `, autorisation -${formatMinutesToHours(totalAuthorizationMinutes)}`;
     } else if (mission) {
-      // ✅ FIX: partial day mission (has clock-in/out) → add mission hours, subtract lunch
       const missionMinutes = getAuthorizationMinutes(mission);
       if (missionMinutes) {
-        // Employee was also at office + on mission: add mission time, deduct lunch once
         finalMinutes = Math.max(0, workedMinutes + missionMinutes - 60);
         details += `, mission +${formatMinutesToHours(missionMinutes)} -1h pause`;
       } else {
@@ -465,15 +465,11 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
-  // ── PARTIAL RECORD (only arrival OR only departure) ────────────────────────
   if (attendanceRow && (arrival || departure)) {
     const partialText = `${arrival ? formatTimeHHMM(arrival) : 'entrée manquante'} → ${departure ? formatTimeHHMM(departure) : 'sortie manquante'}`;
     return { minutes: 0, text: `— (${partialText})`, lateCount: 0 };
   }
 
-  // ── NO ATTENDANCE RECORD ───────────────────────────────────────────────────
-
-  // Autorisation only (no badge) → count the autorisation duration
   if (totalAuthorizationMinutes > 0) {
     return {
       minutes: totalAuthorizationMinutes,
@@ -482,7 +478,6 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
-  // ✅ FIX: Mission with no attendance record = full day mission → fixed 8h
   if (mission) {
     return {
       minutes: 480,
@@ -491,7 +486,6 @@ function chooseDayDisplay(attendanceRow, requestsForDay) {
     };
   }
 
-  // Nothing at all
   return { minutes: 0, text: '—', lateCount: 0 };
 }
 
@@ -504,7 +498,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-// ==================== ADVISORY LOCK FUNCTIONS (prevents duplicate emails on Azure multi-instance) ====================
+// ==================== ADVISORY LOCK FUNCTIONS ====================
 
 const acquireJobLock = async (lockId) => {
   const instanceId = process.env.WEBSITE_INSTANCE_ID || `instance_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -2000,6 +1994,25 @@ try {
   console.warn("⚠️ Cron scheduling not available:", error.message);
 }
 
+// ==================== DB CONNECTION TEST ====================
+async function testDatabaseConnections() {
+  try {
+    await poolHR.query('SELECT 1');
+    console.log('✅ HR database connection OK');
+  } catch (err) {
+    console.error('❌ FATAL: HR database connection failed:', err.message);
+    console.error('   Check DB_HOST, DB_USER, DB_PASS, DB_NAME env vars in Azure');
+    process.exit(1);
+  }
+  try {
+    await poolAttendance.query('SELECT 1');
+    console.log('✅ Attendance database connection OK');
+  } catch (err) {
+    console.error('❌ FATAL: Attendance database connection failed:', err.message);
+    process.exit(1);
+  }
+}
+
 // ==================== SERVER START ====================
 
 const PORT = process.env.PORT || 5001;
@@ -2018,6 +2031,7 @@ app.listen(PORT, async () => {
   📊 SMTP Status:     http://localhost:${PORT}/api/smtp-status
   `);
 
+  await testDatabaseConnections();
   await verifySMTPConnection();
 
   try { await fs.access(TEMPLATE_TRAVAIL_PATH); console.log('✅ Template attestation travail trouvé'); }
