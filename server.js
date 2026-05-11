@@ -183,6 +183,10 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
+const SALARY_ADVANCE_RECIPIENTS = (process.env.SALARY_ADVANCE_RECIPIENTS || 'fethi.chaouachi@avocarbon.com,nesria.ibrahim@avocarbon.com')
+  .split(',')
+  .map(email => email.trim())
+  .filter(Boolean);
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
@@ -498,6 +502,34 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+
+async function ensureSalaryAdvanceTable() {
+  await poolHR.query(`
+    CREATE TABLE IF NOT EXISTS demandes_avance_salaire (
+      id SERIAL PRIMARY KEY,
+      employe_id INTEGER NOT NULL REFERENCES employees(id),
+      titre_motif TEXT NOT NULL,
+      montant_demande NUMERIC(12, 3) NOT NULL,
+      mode_remboursement_souhaite TEXT NOT NULL,
+      signature_demandeur TEXT NOT NULL,
+      acceptation_responsabilite BOOLEAN NOT NULL DEFAULT false,
+      montant_accorde NUMERIC(12, 3),
+      mode_remboursement_appliquer TEXT,
+      statut VARCHAR(30) NOT NULL DEFAULT 'en_attente_admin',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function formatMontantTND(value) {
+  const numberValue = Number(value || 0);
+  return numberValue.toLocaleString('fr-TN', {
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3
+  });
+}
+
 // ==================== ADVISORY LOCK FUNCTIONS ====================
 
 const acquireJobLock = async (lockId) => {
@@ -730,6 +762,66 @@ async function genererPDFDemandeApprouvee(demande, joursOuvres = 0) {
       doc.fillColor('#666666').fontSize(9).font('Helvetica')
         .text('Cet email est envoyé automatiquement par le système de gestion RH', 50, footerY + 20, { align: 'center', width: doc.page.width - 100 });
       doc.text(`Généré le ${formatDateFR(new Date())}`, 50, footerY + 35, { align: 'center', width: doc.page.width - 100 });
+
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+
+async function genererPDFAvanceSalaire(demande) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margins: { top: 45, bottom: 45, left: 50, right: 50 } });
+      const chunks = [];
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      doc.font('Helvetica-Bold').fontSize(18).text('FICHE D\'AVANCE SUR SALAIRE', { align: 'center' });
+      doc.moveDown(1.2);
+      doc.font('Helvetica').fontSize(11);
+
+      const line = (label, value = '') => {
+        doc.font('Helvetica-Bold').text(label, { continued: true });
+        doc.font('Helvetica').text(` ${value || ''}`);
+        doc.moveDown(0.7);
+      };
+
+      line('Date :', formatDateFR(demande.created_at || new Date()));
+      line('Nom et prénoms :', `${demande.nom} ${demande.prenom}`);
+      line('Poste occupé :', demande.poste || '');
+      line('Titre & Motif de l\'avance :', demande.titre_motif);
+      line('Montant demandé :', `${formatMontantTND(demande.montant_demande)} TND`);
+      line('Mode de remboursement souhaité :', demande.mode_remboursement_souhaite);
+
+      doc.moveDown(0.8);
+      doc.font('Helvetica-Bold').text('Signature demandeur :', { continued: true });
+      doc.font('Helvetica').text(` ${demande.signature_demandeur}`);
+      doc.fontSize(9).fillColor('#555555')
+        .text(`Acceptation et prise de responsabilité confirmées le ${formatDateFR(demande.created_at || new Date())}.`);
+      doc.fillColor('#000000').fontSize(11);
+
+      doc.moveDown(1.4);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke('#9ca3af');
+      doc.moveDown(0.8);
+      doc.font('Helvetica-Bold').text('-A remplir par l\'administration-', { align: 'center' });
+      doc.moveDown(1.0);
+      line('Montant accordé :', demande.montant_accorde ? `${formatMontantTND(demande.montant_accorde)} TND` : '');
+      line('Mode de remboursement à appliquer :', demande.mode_remboursement_appliquer || '');
+      doc.moveDown(1.4);
+      doc.font('Helvetica-Bold').text('Signature Bénéficiaire :');
+      doc.font('Helvetica').fontSize(9)
+        .text('(avec mention : montant reçu et mode de remboursement accepté)');
+
+      const footerY = doc.page.height - 75;
+      doc.fontSize(8).fillColor('#555555')
+        .text('Adresse : Cyber Parc. H.Lif Ben Arous 2050. Carte d\'identification fiscale : 000M A 1793574/B', 50, footerY, {
+          align: 'center',
+          width: doc.page.width - 100
+        });
 
       doc.end();
     } catch (error) {
@@ -1198,6 +1290,95 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   } catch (error) {
     console.error('❌ Erreur téléchargement attestation:', error);
     res.status(500).json({ error: 'Erreur lors de la génération du document' });
+  }
+});
+
+
+app.post('/api/demandes-avance-salaire', async (req, res) => {
+  const {
+    employe_id,
+    titre_motif,
+    montant_demande,
+    mode_remboursement_souhaite,
+    signature_demandeur,
+    acceptation_responsabilite
+  } = req.body;
+
+  try {
+    if (!employe_id || !titre_motif || !montant_demande || !mode_remboursement_souhaite || !signature_demandeur || !acceptation_responsabilite) {
+      return res.status(400).json({
+        error: 'Employé, motif, montant, mode de remboursement, signature et acceptation sont obligatoires'
+      });
+    }
+
+    const montant = parseFloat(montant_demande);
+    if (!Number.isFinite(montant) || montant <= 0) {
+      return res.status(400).json({ error: 'Le montant demandé doit être supérieur à 0' });
+    }
+
+    const employeResult = await poolHR.query(
+      `SELECT id, matricule, nom, prenom, poste, adresse_mail
+       FROM employees WHERE id = $1`,
+      [employe_id]
+    );
+
+    if (employeResult.rows.length === 0) return res.status(404).json({ error: 'Employé non trouvé' });
+    const employe = employeResult.rows[0];
+
+    const insertResult = await poolHR.query(
+      `INSERT INTO demandes_avance_salaire
+       (employe_id, titre_motif, montant_demande, mode_remboursement_souhaite, signature_demandeur, acceptation_responsabilite)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [employe_id, titre_motif.trim(), montant, mode_remboursement_souhaite.trim(), signature_demandeur.trim(), true]
+    );
+
+    const demande = { ...insertResult.rows[0], ...employe };
+    const pdfBuffer = await genererPDFAvanceSalaire(demande);
+    const pdfFileName = `Demande_Avance_Salaire_${employe.nom}_${employe.prenom}_${Date.now()}.pdf`;
+
+    await sendEmailWithRetry({
+      from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+      to: SALARY_ADVANCE_RECIPIENTS,
+      subject: `Demande d'avance sur salaire - ${employe.nom} ${employe.prenom}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 650px; margin: 0 auto;">
+          <h2 style="color:#2563eb; border-bottom:2px solid #2563eb; padding-bottom:10px;">Demande d'avance sur salaire</h2>
+          <div style="background:#f8fafc; padding:20px; border-radius:8px; margin:20px 0;">
+            <p><strong>Employé:</strong> ${escapeHtml(employe.nom)} ${escapeHtml(employe.prenom)}</p>
+            <p><strong>Matricule:</strong> ${escapeHtml(employe.matricule || 'Non spécifié')}</p>
+            <p><strong>Poste:</strong> ${escapeHtml(employe.poste || 'Non spécifié')}</p>
+            <p><strong>Motif:</strong> ${escapeHtml(titre_motif)}</p>
+            <p><strong>Montant demandé:</strong> ${formatMontantTND(montant)} TND</p>
+            <p><strong>Mode de remboursement souhaité:</strong> ${escapeHtml(mode_remboursement_souhaite)}</p>
+            <p><strong>Signature demandeur:</strong> ${escapeHtml(signature_demandeur)}</p>
+          </div>
+          <p style="color:#6b7280; font-size:14px;">Le document signé par le demandeur est joint en PDF.</p>
+        </div>
+      `,
+      attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
+    }, 'Demande avance sur salaire');
+
+    if (employe.adresse_mail) {
+      await sendEmailWithRetry({
+        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+        to: employe.adresse_mail,
+        subject: 'Votre demande d\'avance sur salaire a été transmise',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color:#10b981;">Demande transmise</h2>
+            <p>Bonjour ${escapeHtml(employe.nom)} ${escapeHtml(employe.prenom)},</p>
+            <p>Votre demande d'avance sur salaire a été transmise à l'administration RH.</p>
+            <p><strong>Montant demandé:</strong> ${formatMontantTND(montant)} TND</p>
+          </div>
+        `
+      }, 'Confirmation employé - avance sur salaire');
+    }
+
+    res.json({ success: true, message: 'Demande d\'avance sur salaire créée et envoyée avec succès', demandeId: insertResult.rows[0].id });
+  } catch (err) {
+    console.error('❌ Erreur demande avance sur salaire:', err);
+    res.status(500).json({ error: 'Erreur lors de la création de la demande d\'avance: ' + err.message });
   }
 });
 
@@ -2032,6 +2213,7 @@ app.listen(PORT, async () => {
   `);
 
   await testDatabaseConnections();
+  await ensureSalaryAdvanceTable();
   await verifySMTPConnection();
 
   try { await fs.access(TEMPLATE_TRAVAIL_PATH); console.log('✅ Template attestation travail trouvé'); }
