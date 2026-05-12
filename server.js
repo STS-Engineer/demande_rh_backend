@@ -1987,7 +1987,7 @@ app.get('/avance-confirmation-employe', async (req, res) => {
                 ✅ J'accepte les conditions
               </button>
               <button class="btn btn-decline" id="btnDecline" onclick="refuser()">
-                ❌ Je refuse
+                ❌ J’annule la demande
               </button>
             </div>
 
