@@ -183,10 +183,8 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
-const SALARY_ADVANCE_RECIPIENTS = (process.env.SALARY_ADVANCE_RECIPIENTS || 'fethi.chaouachi@avocarbon.com,nesria.ibrahim@avocarbon.com')
-  .split(',')
-  .map(email => email.trim())
-  .filter(Boolean);
+const SALARY_ADVANCE_MANAGER = 'rami.mejri@avocarbon.com';
+const SALARY_ADVANCE_HR      = 'rihem.arfaoui@avocarbon.com';
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
@@ -515,11 +513,23 @@ async function ensureSalaryAdvanceTable() {
       acceptation_responsabilite BOOLEAN NOT NULL DEFAULT false,
       montant_accorde NUMERIC(12, 3),
       mode_remboursement_appliquer TEXT,
-      statut VARCHAR(30) NOT NULL DEFAULT 'en_attente_admin',
+      commentaire_refus TEXT,
+      statut VARCHAR(40) NOT NULL DEFAULT 'en_attente_admin',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Safe migrations for existing tables
+  const migrations = [
+    `ALTER TABLE demandes_avance_salaire ADD COLUMN IF NOT EXISTS commentaire_refus TEXT`,
+    `ALTER TABLE demandes_avance_salaire ALTER COLUMN statut TYPE VARCHAR(40)`
+  ];
+  for (const sql of migrations) {
+    await poolHR.query(sql).catch(() => {});
+  }
+
+  console.log('✅ Table demandes_avance_salaire OK');
 }
 
 function formatMontantTND(value) {
@@ -1304,81 +1314,887 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
     acceptation_responsabilite
   } = req.body;
 
+  // --- Validation ---
+  if (!employe_id || !titre_motif || !montant_demande || !mode_remboursement_souhaite || !signature_demandeur || !acceptation_responsabilite) {
+    return res.status(400).json({
+      error: 'Employé, motif, montant, mode de remboursement, signature et acceptation sont obligatoires'
+    });
+  }
+
+  const montant = parseFloat(montant_demande);
+  if (!Number.isFinite(montant) || montant <= 0) {
+    return res.status(400).json({ error: 'Le montant demandé doit être supérieur à 0' });
+  }
+
   try {
-    if (!employe_id || !titre_motif || !montant_demande || !mode_remboursement_souhaite || !signature_demandeur || !acceptation_responsabilite) {
-      return res.status(400).json({
-        error: 'Employé, motif, montant, mode de remboursement, signature et acceptation sont obligatoires'
-      });
-    }
-
-    const montant = parseFloat(montant_demande);
-    if (!Number.isFinite(montant) || montant <= 0) {
-      return res.status(400).json({ error: 'Le montant demandé doit être supérieur à 0' });
-    }
-
     const employeResult = await poolHR.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail
        FROM employees WHERE id = $1`,
       [employe_id]
     );
-
-    if (employeResult.rows.length === 0) return res.status(404).json({ error: 'Employé non trouvé' });
+    if (employeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employé non trouvé' });
+    }
     const employe = employeResult.rows[0];
 
     const insertResult = await poolHR.query(
       `INSERT INTO demandes_avance_salaire
-       (employe_id, titre_motif, montant_demande, mode_remboursement_souhaite, signature_demandeur, acceptation_responsabilite)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       (employe_id, titre_motif, montant_demande, mode_remboursement_souhaite,
+        signature_demandeur, acceptation_responsabilite, statut)
+       VALUES ($1, $2, $3, $4, $5, $6, 'en_attente_admin')
        RETURNING *`,
-      [employe_id, titre_motif.trim(), montant, mode_remboursement_souhaite.trim(), signature_demandeur.trim(), true]
+      [employe_id, titre_motif.trim(), montant, mode_remboursement_souhaite.trim(),
+       signature_demandeur.trim(), true]
     );
 
+    const demandeId = insertResult.rows[0].id;
+    const decisionLink = `${BASE_URL}/avance-decision?id=${demandeId}`;
+
+    // Send initial PDF (employee's request only — admin section blank)
     const demande = { ...insertResult.rows[0], ...employe };
     const pdfBuffer = await genererPDFAvanceSalaire(demande);
     const pdfFileName = `Demande_Avance_Salaire_${employe.nom}_${employe.prenom}_${Date.now()}.pdf`;
 
+    // Email to manager (Fethi only) with decision link
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: SALARY_ADVANCE_RECIPIENTS,
-      subject: `Demande d'avance sur salaire - ${employe.nom} ${employe.prenom}`,
+      to: SALARY_ADVANCE_MANAGER,
+      subject: `Demande d'avance sur salaire — ${employe.nom} ${employe.prenom}`,
       html: `
-        <div style="font-family: Arial, sans-serif; max-width: 650px; margin: 0 auto;">
-          <h2 style="color:#2563eb; border-bottom:2px solid #2563eb; padding-bottom:10px;">Demande d'avance sur salaire</h2>
-          <div style="background:#f8fafc; padding:20px; border-radius:8px; margin:20px 0;">
-            <p><strong>Employé:</strong> ${escapeHtml(employe.nom)} ${escapeHtml(employe.prenom)}</p>
-            <p><strong>Matricule:</strong> ${escapeHtml(employe.matricule || 'Non spécifié')}</p>
-            <p><strong>Poste:</strong> ${escapeHtml(employe.poste || 'Non spécifié')}</p>
-            <p><strong>Motif:</strong> ${escapeHtml(titre_motif)}</p>
-            <p><strong>Montant demandé:</strong> ${formatMontantTND(montant)} TND</p>
-            <p><strong>Mode de remboursement souhaité:</strong> ${escapeHtml(mode_remboursement_souhaite)}</p>
-            <p><strong>Signature demandeur:</strong> ${escapeHtml(signature_demandeur)}</p>
+        <div style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;">
+          <h2 style="color:#2563eb;border-bottom:2px solid #2563eb;padding-bottom:10px;">
+            💰 Nouvelle demande d'avance sur salaire
+          </h2>
+          <div style="background:#f8fafc;padding:20px;border-radius:8px;margin:20px 0;">
+            <p><strong>Employé :</strong> ${escapeHtml(employe.nom)} ${escapeHtml(employe.prenom)}</p>
+            <p><strong>Matricule :</strong> ${escapeHtml(employe.matricule || '—')}</p>
+            <p><strong>Poste :</strong> ${escapeHtml(employe.poste || '—')}</p>
+            <p><strong>Motif :</strong> ${escapeHtml(titre_motif)}</p>
+            <p><strong>Montant demandé :</strong> <strong style="color:#2563eb;font-size:16px;">${formatMontantTND(montant)} TND</strong></p>
+            <p><strong>Remboursement souhaité :</strong> ${escapeHtml(mode_remboursement_souhaite)}</p>
+            <p><strong>Signature :</strong> ${escapeHtml(signature_demandeur)}</p>
           </div>
-          <p style="color:#6b7280; font-size:14px;">Le document signé par le demandeur est joint en PDF.</p>
+          <div style="text-align:center;margin:30px 0;">
+            <a href="${decisionLink}"
+               style="display:inline-block;padding:14px 36px;background:#2563eb;color:white;
+                      text-decoration:none;border-radius:8px;font-weight:bold;font-size:16px;">
+              ✍️ Traiter la demande
+            </a>
+          </div>
+          <p style="color:#6b7280;font-size:13px;text-align:center;">
+            Vous pouvez approuver le montant tel quel, le modifier, ou refuser la demande.
+            L'employé devra ensuite confirmer votre décision.
+          </p>
         </div>
       `,
       attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
-    }, 'Demande avance sur salaire');
+    }, 'Demande avance sur salaire — managers');
 
+    // Confirmation to employee
     if (employe.adresse_mail) {
       await sendEmailWithRetry({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
         to: employe.adresse_mail,
         subject: 'Votre demande d\'avance sur salaire a été transmise',
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color:#10b981;">Demande transmise</h2>
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            <h2 style="color:#10b981;">📨 Demande transmise</h2>
             <p>Bonjour ${escapeHtml(employe.nom)} ${escapeHtml(employe.prenom)},</p>
-            <p>Votre demande d'avance sur salaire a été transmise à l'administration RH.</p>
-            <p><strong>Montant demandé:</strong> ${formatMontantTND(montant)} TND</p>
+            <p>Votre demande d'avance sur salaire de <strong>${formatMontantTND(montant)} TND</strong>
+               a été transmise à l'administration. Vous recevrez un email dès qu'une décision sera prise.</p>
           </div>
         `
-      }, 'Confirmation employé - avance sur salaire');
+      }, 'Confirmation employé — avance soumise');
     }
 
-    res.json({ success: true, message: 'Demande d\'avance sur salaire créée et envoyée avec succès', demandeId: insertResult.rows[0].id });
+    res.json({
+      success: true,
+      message: 'Demande transmise avec succès',
+      demandeId
+    });
+
   } catch (err) {
-    console.error('❌ Erreur demande avance sur salaire:', err);
-    res.status(500).json({ error: 'Erreur lors de la création de la demande d\'avance: ' + err.message });
+    console.error('❌ Erreur création avance salaire:', err);
+    res.status(500).json({ error: 'Erreur lors de la création de la demande: ' + err.message });
+  }
+});
+
+// ==================== STEP 2: MANAGER DECISION PAGE (GET) ====================
+
+app.get('/avance-decision', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).send('<h1>ID manquant</h1>');
+
+  try {
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
+       FROM demandes_avance_salaire d
+       JOIN employees e ON d.employe_id = e.id
+       WHERE d.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send(`
+        <html><body style="font-family:Arial;text-align:center;padding:60px;background:#f4f4f4;">
+          <div style="background:white;max-width:480px;margin:0 auto;padding:40px;border-radius:12px;">
+            <div style="font-size:48px;">❌</div>
+            <h2 style="color:#ef4444;">Demande non trouvée</h2>
+          </div>
+        </body></html>
+      `);
+    }
+
+    const d = result.rows[0];
+
+    // Already handled by manager
+    if (d.statut !== 'en_attente_admin') {
+      const labels = {
+        en_attente_employe: { icon: '⏳', color: '#f59e0b', text: 'En attente de confirmation de l\'employé' },
+        approuve:           { icon: '✅', color: '#10b981', text: 'Approuvée et confirmée par l\'employé' },
+        refuse_admin:       { icon: '❌', color: '#ef4444', text: 'Refusée par l\'administration' },
+        refuse_employe:     { icon: '🚫', color: '#ef4444', text: 'Refusée par l\'employé' }
+      };
+      const info = labels[d.statut] || { icon: 'ℹ️', color: '#64748b', text: d.statut };
+      return res.send(`
+        <html><body style="font-family:Arial;text-align:center;padding:60px;background:#f4f4f4;">
+          <div style="background:white;max-width:500px;margin:0 auto;padding:40px;border-radius:12px;">
+            <div style="font-size:48px;">${info.icon}</div>
+            <h2 style="color:${info.color};">${info.text}</h2>
+            ${d.statut === 'approuve' ? `
+              <p><strong>Montant accordé :</strong> ${formatMontantTND(d.montant_accorde)} TND</p>
+              <p><strong>Remboursement :</strong> ${escapeHtml(d.mode_remboursement_appliquer || '')}</p>
+            ` : d.commentaire_refus ? `
+              <p><strong>Motif :</strong> ${escapeHtml(d.commentaire_refus)}</p>
+            ` : ''}
+          </div>
+        </body></html>
+      `);
+    }
+
+    // Render decision form for manager
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Décision — Avance sur Salaire #${d.id}</title>
+        <style>
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#1e3a5f,#2563eb);min-height:100vh;padding:30px 16px}
+          .card{background:white;max-width:700px;margin:0 auto;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+          .hdr{background:#1e3a5f;color:white;padding:26px 32px}
+          .hdr h1{font-size:20px;margin-bottom:4px}
+          .hdr p{font-size:13px;color:#94a3b8}
+          .body{padding:28px 32px}
+          .sec-title{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;margin:22px 0 10px}
+          .info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px}
+          .row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:14px}
+          .row:last-child{border-bottom:none}
+          .lbl{color:#64748b;font-weight:600}
+          .val{color:#1e293b;font-weight:500;text-align:right;max-width:58%}
+          .big{color:#2563eb;font-size:17px;font-weight:700}
+          .form-group{margin-top:18px}
+          .form-group label{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:6px}
+          input[type=number],textarea{width:100%;padding:10px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit;transition:border-color .2s}
+          input[type=number]:focus,textarea:focus{outline:none;border-color:#2563eb}
+          .hint{font-size:12px;color:#94a3b8;margin-top:5px}
+          .err{color:#ef4444;font-size:12px;margin-top:4px;display:none}
+          hr{border:none;border-top:1px solid #e2e8f0;margin:24px 0}
+          .btn-row{display:flex;gap:12px;margin-top:24px}
+          .btn{flex:1;padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;transition:all .2s}
+          .btn-ok{background:#10b981;color:white}
+          .btn-ok:hover:not(:disabled){background:#059669;transform:translateY(-1px)}
+          .btn-no{background:#ef4444;color:white}
+          .btn-no:hover:not(:disabled){background:#dc2626;transform:translateY(-1px)}
+          .btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
+          .refus-box{display:none;margin-top:20px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:18px}
+          .refus-box label{display:block;font-size:13px;font-weight:600;color:#991b1b;margin-bottom:6px}
+          .badge{display:inline-block;padding:3px 12px;background:#fef3c7;color:#92400e;border-radius:20px;font-size:13px;font-weight:500}
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="hdr">
+            <h1>💰 Avance sur Salaire — Décision</h1>
+            <p>Demande #${d.id} &nbsp;·&nbsp; Soumise le ${formatDateFR(d.created_at)} &nbsp;·&nbsp; <span class="badge">En attente de votre décision</span></p>
+          </div>
+          <div class="body">
+
+            <div class="sec-title">Employé</div>
+            <div class="info-box">
+              <div class="row"><span class="lbl">Nom</span><span class="val">${escapeHtml(d.nom)} ${escapeHtml(d.prenom)}</span></div>
+              <div class="row"><span class="lbl">Matricule</span><span class="val">${escapeHtml(d.matricule || '—')}</span></div>
+              <div class="row"><span class="lbl">Poste</span><span class="val">${escapeHtml(d.poste || '—')}</span></div>
+            </div>
+
+            <div class="sec-title">Ce que l'employé demande</div>
+            <div class="info-box">
+              <div class="row"><span class="lbl">Motif</span><span class="val">${escapeHtml(d.titre_motif)}</span></div>
+              <div class="row"><span class="lbl">Montant demandé</span><span class="val big">${formatMontantTND(d.montant_demande)} TND</span></div>
+              <div class="row"><span class="lbl">Remboursement souhaité</span><span class="val">${escapeHtml(d.mode_remboursement_souhaite)}</span></div>
+              <div class="row"><span class="lbl">Signature</span><span class="val">${escapeHtml(d.signature_demandeur)}</span></div>
+            </div>
+
+            <hr>
+            <div class="sec-title">✍️ Votre décision — vous pouvez modifier les conditions</div>
+
+            <div class="form-group">
+              <label>Montant accordé (TND) *</label>
+              <input type="number" id="montant_accorde" min="0.001" step="0.001"
+                     value="${parseFloat(d.montant_demande).toFixed(3)}" />
+              <div class="hint">L'employé a demandé ${formatMontantTND(d.montant_demande)} TND — modifiez si nécessaire.</div>
+              <div class="err" id="e_montant">Montant invalide (doit être > 0).</div>
+            </div>
+
+            <div class="form-group">
+              <label>Mode de remboursement à appliquer *</label>
+              <textarea id="mode_remboursement" rows="3"
+                placeholder="Ex: retenue de 400 TND/mois sur 2 mois">${escapeHtml(d.mode_remboursement_souhaite)}</textarea>
+              <div class="hint">Proposition de l'employé : « ${escapeHtml(d.mode_remboursement_souhaite)} »</div>
+              <div class="err" id="e_mode">Veuillez préciser le mode de remboursement.</div>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-ok" id="btnOk" onclick="approuver()">✅ Approuver et envoyer à l'employé</button>
+              <button class="btn btn-no" id="btnNo" onclick="showRefus()">❌ Refuser</button>
+            </div>
+
+            <div class="refus-box" id="refusBox">
+              <label>Motif du refus (obligatoire) *</label>
+              <textarea id="commentaire_refus" rows="3"
+                placeholder="Expliquez la raison du refus à l'employé..."></textarea>
+              <div class="err" id="e_refus">Veuillez indiquer le motif du refus.</div>
+              <div style="margin-top:12px">
+                <button class="btn btn-no" id="btnConfirmRefus" onclick="refuser()"
+                  style="max-width:260px;">Confirmer le refus</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <script>
+          const DID = ${parseInt(id, 10)};
+
+          function lock(on){
+            ['btnOk','btnNo','btnConfirmRefus'].forEach(id=>{
+              const b=document.getElementById(id);
+              if(b) b.disabled=on;
+            });
+          }
+
+          function showErr(id,show){
+            document.getElementById(id).style.display=show?'block':'none';
+          }
+
+          function showRefus(){
+            document.getElementById('refusBox').style.display='block';
+            document.getElementById('btnNo').style.display='none';
+          }
+
+          function done(statut,msg){
+            document.querySelector('.body').innerHTML=\`
+              <div style="text-align:center;padding:50px 20px;">
+                <div style="font-size:60px;">\${statut==='approuve'?'✅':'❌'}</div>
+                <h2 style="color:\${statut==='approuve'?'#10b981':'#ef4444'};margin:18px 0 10px;">
+                  \${statut==='approuve'?'Décision envoyée à l\\'employé':'Demande refusée'}
+                </h2>
+                <p style="color:#64748b;font-size:14px;">\${msg}</p>
+              </div>
+            \`;
+          }
+
+          async function approuver(){
+            const montant=parseFloat(document.getElementById('montant_accorde').value);
+            const mode=document.getElementById('mode_remboursement').value.trim();
+            let ok=true;
+            if(!montant||montant<=0){showErr('e_montant',true);ok=false;}else showErr('e_montant',false);
+            if(!mode){showErr('e_mode',true);ok=false;}else showErr('e_mode',false);
+            if(!ok)return;
+            lock(true);
+            try{
+              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/decision-manager',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({action:'approuver',montant_accorde:montant,mode_remboursement_appliquer:mode})
+              });
+              const data=await r.json();
+              if(r.ok) done('approuve',data.message||'L\\'employé va recevoir un email pour confirmer votre décision.');
+              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
+            }catch(e){alert('Erreur réseau');lock(false);}
+          }
+
+          async function refuser(){
+            const commentaire=document.getElementById('commentaire_refus').value.trim();
+            if(!commentaire){showErr('e_refus',true);return;}
+            showErr('e_refus',false);
+            lock(true);
+            try{
+              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/decision-manager',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({action:'refuser',commentaire_refus:commentaire})
+              });
+              const data=await r.json();
+              if(r.ok) done('refuse',data.message||'L\\'employé a été notifié du refus.');
+              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
+            }catch(e){alert('Erreur réseau');lock(false);}
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('❌ Erreur page décision manager:', err);
+    res.status(500).send('<h1>Erreur serveur</h1>');
+  }
+});
+
+// ==================== STEP 2: MANAGER DECISION API (POST) ====================
+
+app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) => {
+  const { id } = req.params;
+  const { action, montant_accorde, mode_remboursement_appliquer, commentaire_refus } = req.body;
+
+  if (!['approuver', 'refuser'].includes(action)) {
+    return res.status(400).json({ error: 'Action invalide' });
+  }
+
+  try {
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
+       FROM demandes_avance_salaire d
+       JOIN employees e ON d.employe_id = e.id
+       WHERE d.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Demande non trouvée' });
+    const demande = result.rows[0];
+
+    // State guard — only process if waiting for manager
+    if (demande.statut !== 'en_attente_admin') {
+      return res.status(409).json({
+        error: `Statut invalide pour cette action : ${demande.statut}`
+      });
+    }
+
+    // ---- MANAGER REFUSES ----
+    if (action === 'refuser') {
+      const commentaire = (commentaire_refus || '').trim();
+      if (!commentaire) return res.status(400).json({ error: 'Motif du refus obligatoire' });
+
+      await poolHR.query(
+        `UPDATE demandes_avance_salaire
+         SET statut='refuse_admin', commentaire_refus=$1, updated_at=CURRENT_TIMESTAMP
+         WHERE id=$2`,
+        [commentaire, id]
+      );
+
+      if (demande.adresse_mail) {
+        await sendEmailWithRetry({
+          from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+          to: demande.adresse_mail,
+          subject: 'Votre demande d\'avance sur salaire — Refusée',
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+              <h2 style="color:#ef4444;border-bottom:3px solid #ef4444;padding-bottom:10px;">
+                ❌ Demande d'avance refusée
+              </h2>
+              <div style="background:#fef2f2;padding:20px;border-radius:8px;margin:20px 0;border-left:4px solid #ef4444;">
+                <p>Bonjour <strong>${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</strong>,</p>
+                <p>Votre demande d'avance sur salaire de <strong>${formatMontantTND(demande.montant_demande)} TND</strong>
+                   n'a pas pu être accordée.</p>
+                <p><strong>Motif :</strong> ${escapeHtml(commentaire)}</p>
+              </div>
+              <p style="color:#6b7280;font-size:13px;">
+                Pour toute question, rapprochez-vous de votre responsable ou de l'administration RH.
+              </p>
+            </div>
+          `
+        }, 'Refus avance — email employé');
+      }
+
+      return res.json({ success: true, message: 'Demande refusée. L\'employé a été notifié.' });
+    }
+
+    // ---- MANAGER APPROVES (possibly with modified terms) ----
+    const montant = parseFloat(montant_accorde);
+    const mode = (mode_remboursement_appliquer || '').trim();
+
+    if (!Number.isFinite(montant) || montant <= 0) {
+      return res.status(400).json({ error: 'montant_accorde doit être un nombre positif' });
+    }
+    if (!mode) {
+      return res.status(400).json({ error: 'mode_remboursement_appliquer est obligatoire' });
+    }
+
+    // Save manager's proposed terms, move to awaiting employee confirmation
+    await poolHR.query(
+      `UPDATE demandes_avance_salaire
+       SET statut='en_attente_employe',
+           montant_accorde=$1,
+           mode_remboursement_appliquer=$2,
+           updated_at=CURRENT_TIMESTAMP
+       WHERE id=$3`,
+      [montant, mode, id]
+    );
+
+    // Determine if manager modified the terms
+    const montantModifie = Math.abs(montant - parseFloat(demande.montant_demande)) > 0.001;
+    const modeModifie = mode.trim() !== demande.mode_remboursement_souhaite.trim();
+    const termsChanged = montantModifie || modeModifie;
+
+    const confirmLink = `${BASE_URL}/avance-confirmation-employe?id=${id}`;
+
+    // Email to employee with manager's decision — they must accept or reject
+    if (demande.adresse_mail) {
+      await sendEmailWithRetry({
+        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+        to: demande.adresse_mail,
+        subject: termsChanged
+          ? '⚠️ Votre demande d\'avance — conditions modifiées, confirmation requise'
+          : '✅ Votre demande d\'avance approuvée — confirmation requise',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;">
+            <h2 style="color:${termsChanged ? '#f59e0b' : '#10b981'};border-bottom:3px solid ${termsChanged ? '#f59e0b' : '#10b981'};padding-bottom:10px;">
+              ${termsChanged ? '⚠️ Décision avec conditions modifiées' : '✅ Demande approuvée par l\'administration'}
+            </h2>
+
+            <p>Bonjour <strong>${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</strong>,</p>
+
+            ${termsChanged ? `
+              <div style="background:#fffbeb;padding:16px 20px;border-radius:8px;border-left:4px solid #f59e0b;margin:16px 0;">
+                <p style="margin:0;color:#92400e;">
+                  <strong>⚠️ L'administration a modifié les conditions de votre demande.</strong>
+                  Veuillez lire attentivement et confirmer ou refuser ces nouvelles conditions.
+                </p>
+              </div>
+            ` : `
+              <div style="background:#f0fdf4;padding:16px 20px;border-radius:8px;border-left:4px solid #10b981;margin:16px 0;">
+                <p style="margin:0;color:#065f46;">
+                  Votre demande a été approuvée avec les conditions que vous avez proposées.
+                  Veuillez confirmer votre accord.
+                </p>
+              </div>
+            `}
+
+            <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left;padding:10px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;font-size:12px;text-transform:uppercase;">Élément</th>
+                  <th style="text-align:center;padding:10px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;font-size:12px;text-transform:uppercase;">Votre demande</th>
+                  <th style="text-align:center;padding:10px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;font-size:12px;text-transform:uppercase;">Décision administration</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;font-weight:600;color:#374151;">Montant</td>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;text-align:center;color:#64748b;">${formatMontantTND(demande.montant_demande)} TND</td>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;text-align:center;font-weight:700;color:${montantModifie ? '#dc2626' : '#10b981'};">
+                    ${formatMontantTND(montant)} TND ${montantModifie ? '⚠️' : '✅'}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;font-weight:600;color:#374151;">Remboursement</td>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;text-align:center;color:#64748b;">${escapeHtml(demande.mode_remboursement_souhaite)}</td>
+                  <td style="padding:12px 10px;border:1px solid #e2e8f0;text-align:center;font-weight:700;color:${modeModifie ? '#dc2626' : '#10b981'};">
+                    ${escapeHtml(mode)} ${modeModifie ? '⚠️' : '✅'}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div style="text-align:center;margin:30px 0;">
+              <a href="${confirmLink}"
+                 style="display:inline-block;padding:14px 36px;background:#2563eb;color:white;
+                        text-decoration:none;border-radius:8px;font-weight:bold;font-size:16px;">
+                👉 Voir et confirmer ma décision
+              </a>
+            </div>
+            <p style="color:#6b7280;font-size:13px;text-align:center;">
+              Vous devrez accepter ou refuser les conditions proposées par l'administration.
+            </p>
+          </div>
+        `
+      }, 'Décision manager — email employé pour confirmation');
+    }
+
+    return res.json({
+      success: true,
+      message: termsChanged
+        ? 'Conditions modifiées envoyées à l\'employé pour confirmation.'
+        : 'Approbation envoyée à l\'employé pour confirmation.'
+    });
+
+  } catch (err) {
+    console.error('❌ Erreur décision manager avance:', err);
+    res.status(500).json({ error: 'Erreur serveur: ' + err.message });
+  }
+});
+
+// ==================== STEP 3: EMPLOYEE CONFIRMATION PAGE (GET) ====================
+
+app.get('/avance-confirmation-employe', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).send('<h1>ID manquant</h1>');
+
+  try {
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
+       FROM demandes_avance_salaire d
+       JOIN employees e ON d.employe_id = e.id
+       WHERE d.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send(`
+        <html><body style="font-family:Arial;text-align:center;padding:60px;background:#f4f4f4;">
+          <div style="background:white;max-width:480px;margin:0 auto;padding:40px;border-radius:12px;">
+            <div style="font-size:48px;">❌</div><h2 style="color:#ef4444;">Demande non trouvée</h2>
+          </div>
+        </body></html>
+      `);
+    }
+
+    const d = result.rows[0];
+
+    // Already confirmed/rejected by employee
+    if (d.statut !== 'en_attente_employe') {
+      const labels = {
+        approuve:       { icon: '✅', color: '#10b981', text: 'Vous avez accepté — l\'avance est confirmée' },
+        refuse_employe: { icon: '🚫', color: '#ef4444', text: 'Vous avez refusé les conditions proposées' },
+        refuse_admin:   { icon: '❌', color: '#ef4444', text: 'Cette demande a été refusée par l\'administration' }
+      };
+      const info = labels[d.statut] || { icon: 'ℹ️', color: '#64748b', text: d.statut };
+      return res.send(`
+        <html><body style="font-family:Arial;text-align:center;padding:60px;background:#f4f4f4;">
+          <div style="background:white;max-width:500px;margin:0 auto;padding:40px;border-radius:12px;">
+            <div style="font-size:48px;">${info.icon}</div>
+            <h2 style="color:${info.color};margin-top:16px;">${info.text}</h2>
+          </div>
+        </body></html>
+      `);
+    }
+
+    const montantModifie = Math.abs(parseFloat(d.montant_accorde) - parseFloat(d.montant_demande)) > 0.001;
+    const modeModifie = (d.mode_remboursement_appliquer || '').trim() !== (d.mode_remboursement_souhaite || '').trim();
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Confirmation — Avance sur Salaire</title>
+        <style>
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#0f4c81,#1e88e5);min-height:100vh;padding:30px 16px}
+          .card{background:white;max-width:660px;margin:0 auto;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+          .hdr{background:#0f4c81;color:white;padding:26px 32px}
+          .hdr h1{font-size:20px;margin-bottom:4px}
+          .hdr p{font-size:13px;color:#90caf9}
+          .body{padding:28px 32px}
+          .alert{padding:16px 20px;border-radius:10px;margin-bottom:20px;font-size:14px}
+          .alert-warn{background:#fffbeb;border-left:4px solid #f59e0b;color:#92400e}
+          .alert-ok{background:#f0fdf4;border-left:4px solid #10b981;color:#065f46}
+          table{width:100%;border-collapse:collapse;font-size:14px;margin:16px 0}
+          th{background:#f8fafc;padding:10px;color:#64748b;border:1px solid #e2e8f0;font-size:11px;text-transform:uppercase;text-align:center}
+          th:first-child{text-align:left}
+          td{padding:12px 10px;border:1px solid #e2e8f0;vertical-align:top}
+          td:not(:first-child){text-align:center}
+          .changed{color:#dc2626;font-weight:700}
+          .same{color:#10b981;font-weight:700}
+          .sec-title{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;margin:22px 0 10px}
+          .checkbox-row{display:flex;align-items:flex-start;gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-top:16px}
+          .checkbox-row input{margin-top:3px;width:18px;height:18px;cursor:pointer;flex-shrink:0}
+          .checkbox-row label{font-size:14px;color:#374151;cursor:pointer;line-height:1.5}
+          .err{color:#ef4444;font-size:12px;margin-top:6px;display:none}
+          .btn-row{display:flex;gap:12px;margin-top:24px}
+          .btn{flex:1;padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;transition:all .2s}
+          .btn-accept{background:#10b981;color:white}
+          .btn-accept:hover:not(:disabled){background:#059669;transform:translateY(-1px)}
+          .btn-decline{background:#ef4444;color:white}
+          .btn-decline:hover:not(:disabled){background:#dc2626;transform:translateY(-1px)}
+          .btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="hdr">
+            <h1>💰 Avance sur Salaire — Votre Confirmation</h1>
+            <p>Demande #${d.id} &nbsp;·&nbsp; L'administration a rendu sa décision</p>
+          </div>
+          <div class="body">
+
+            ${(montantModifie || modeModifie) ? `
+              <div class="alert alert-warn">
+                <strong>⚠️ Attention :</strong> L'administration a modifié les conditions de votre demande.
+                Veuillez comparer attentivement avant de confirmer.
+              </div>
+            ` : `
+              <div class="alert alert-ok">
+                <strong>✅ Bonne nouvelle :</strong> L'administration a approuvé votre demande
+                avec les conditions que vous avez proposées.
+              </div>
+            `}
+
+            <div class="sec-title">Comparatif — Votre demande vs Décision administration</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Élément</th>
+                  <th>Votre demande</th>
+                  <th>Décision administration</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="font-weight:600;color:#374151;">Montant</td>
+                  <td style="color:#64748b;">${formatMontantTND(d.montant_demande)} TND</td>
+                  <td class="${montantModifie ? 'changed' : 'same'}">
+                    ${formatMontantTND(d.montant_accorde)} TND ${montantModifie ? '⚠️ Modifié' : '✅'}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="font-weight:600;color:#374151;">Remboursement</td>
+                  <td style="color:#64748b;">${escapeHtml(d.mode_remboursement_souhaite)}</td>
+                  <td class="${modeModifie ? 'changed' : 'same'}">
+                    ${escapeHtml(d.mode_remboursement_appliquer)} ${modeModifie ? '⚠️ Modifié' : '✅'}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div class="sec-title">Votre accord</div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="accepte" />
+              <label for="accepte">
+                Je, <strong>${escapeHtml(d.nom)} ${escapeHtml(d.prenom)}</strong>,
+                confirme avoir pris connaissance de la décision de l'administration
+                et j'accepte les conditions indiquées ci-dessus :
+                montant de <strong>${formatMontantTND(d.montant_accorde)} TND</strong>
+                avec remboursement selon : <strong>${escapeHtml(d.mode_remboursement_appliquer)}</strong>.
+              </label>
+            </div>
+            <div class="err" id="e_check">Veuillez cocher la case pour confirmer votre accord.</div>
+
+            <div class="btn-row">
+              <button class="btn btn-accept" id="btnAccept" onclick="accepter()">
+                ✅ J'accepte les conditions
+              </button>
+              <button class="btn btn-decline" id="btnDecline" onclick="refuser()">
+                ❌ Je refuse
+              </button>
+            </div>
+
+          </div>
+        </div>
+
+        <script>
+          const DID = ${parseInt(id, 10)};
+
+          function lock(on){
+            ['btnAccept','btnDecline'].forEach(id=>{
+              const b=document.getElementById(id);
+              if(b) b.disabled=on;
+            });
+          }
+
+          function done(statut,msg){
+            document.querySelector('.body').innerHTML=\`
+              <div style="text-align:center;padding:50px 20px;">
+                <div style="font-size:60px;">\${statut==='approuve'?'✅':'🚫'}</div>
+                <h2 style="color:\${statut==='approuve'?'#10b981':'#ef4444'};margin:18px 0 10px;">
+                  \${statut==='approuve'?'Avance confirmée !':'Conditions refusées'}
+                </h2>
+                <p style="color:#64748b;font-size:14px;">\${msg}</p>
+              </div>
+            \`;
+          }
+
+          async function accepter(){
+            if(!document.getElementById('accepte').checked){
+              document.getElementById('e_check').style.display='block';
+              return;
+            }
+            document.getElementById('e_check').style.display='none';
+            lock(true);
+            try{
+              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/confirmation-employe',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({action:'accepter'})
+              });
+              const data=await r.json();
+              if(r.ok) done('approuve',data.message||'Le document final vous a été envoyé par email.');
+              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
+            }catch(e){alert('Erreur réseau');lock(false);}
+          }
+
+          async function refuser(){
+            if(!confirm('Êtes-vous sûr de vouloir refuser les conditions proposées ?\\nL\\'administration sera notifiée.')) return;
+            lock(true);
+            try{
+              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/confirmation-employe',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({action:'refuser'})
+              });
+              const data=await r.json();
+              if(r.ok) done('refuse',data.message||'L\\'administration a été notifiée de votre refus.');
+              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
+            }catch(e){alert('Erreur réseau');lock(false);}
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('❌ Erreur page confirmation employé:', err);
+    res.status(500).send('<h1>Erreur serveur</h1>');
+  }
+});
+
+// ==================== STEP 3: EMPLOYEE CONFIRMATION API (POST) ====================
+
+app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, res) => {
+  const { id } = req.params;
+  const { action } = req.body;
+
+  if (!['accepter', 'refuser'].includes(action)) {
+    return res.status(400).json({ error: 'Action invalide' });
+  }
+
+  try {
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
+       FROM demandes_avance_salaire d
+       JOIN employees e ON d.employe_id = e.id
+       WHERE d.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Demande non trouvée' });
+    const demande = result.rows[0];
+
+    // State guard
+    if (demande.statut !== 'en_attente_employe') {
+      return res.status(409).json({
+        error: `Statut invalide pour cette action : ${demande.statut}`
+      });
+    }
+
+    // ---- EMPLOYEE REFUSES MANAGER'S TERMS ----
+    if (action === 'refuser') {
+      await poolHR.query(
+        `UPDATE demandes_avance_salaire
+         SET statut='refuse_employe', updated_at=CURRENT_TIMESTAMP
+         WHERE id=$1`,
+        [id]
+      );
+
+      // Notify Fethi that employee rejected his terms
+      await sendEmailWithRetry({
+        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+        to: SALARY_ADVANCE_MANAGER,
+        subject: `🚫 Avance refusée par l'employé — ${demande.nom} ${demande.prenom}`,
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            <h2 style="color:#ef4444;">🚫 L'employé a refusé les conditions proposées</h2>
+            <div style="background:#fef2f2;padding:20px;border-radius:8px;margin:20px 0;">
+              <p><strong>Employé :</strong> ${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</p>
+              <p><strong>Montant qu'il avait demandé :</strong> ${formatMontantTND(demande.montant_demande)} TND</p>
+              <p><strong>Montant que vous avez accordé :</strong> ${formatMontantTND(demande.montant_accorde)} TND</p>
+              <p><strong>Remboursement proposé :</strong> ${escapeHtml(demande.mode_remboursement_appliquer)}</p>
+            </div>
+            <p style="color:#6b7280;font-size:13px;">
+              Un traitement manuel est nécessaire. Veuillez contacter l'employé directement.
+            </p>
+          </div>
+        `
+      }, 'Refus employé — notification admin');
+
+      return res.json({
+        success: true,
+        message: 'Votre refus a été enregistré. L\'administration a été notifiée et vous contactera.'
+      });
+    }
+
+    // ---- EMPLOYEE ACCEPTS ----
+    await poolHR.query(
+      `UPDATE demandes_avance_salaire
+       SET statut='approuve', updated_at=CURRENT_TIMESTAMP
+       WHERE id=$1`,
+      [id]
+    );
+
+    // Generate FINAL PDF with everything filled in
+    const pdfBuffer = await genererPDFAvanceSalaire(demande);
+    const pdfFileName = `Avance_Salaire_FINALE_${demande.nom}_${demande.prenom}_${Date.now()}.pdf`;
+
+    // Send final PDF to employee
+    if (demande.adresse_mail) {
+      await sendEmailWithRetry({
+        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+        to: demande.adresse_mail,
+        subject: '✅ Avance sur salaire confirmée — Document final',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            <h2 style="color:#10b981;border-bottom:3px solid #10b981;padding-bottom:10px;">
+              ✅ Avance sur salaire confirmée
+            </h2>
+            <div style="background:#f0fdf4;padding:20px;border-radius:8px;margin:20px 0;border-left:4px solid #10b981;">
+              <p>Bonjour <strong>${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</strong>,</p>
+              <p>Votre avance sur salaire est définitivement confirmée.</p>
+            </div>
+            <div style="background:#f8fafc;padding:20px;border-radius:8px;margin:20px 0;">
+              <p><strong>Montant accordé :</strong> <strong style="color:#2563eb;font-size:16px;">${formatMontantTND(demande.montant_accorde)} TND</strong></p>
+              <p><strong>Mode de remboursement :</strong> ${escapeHtml(demande.mode_remboursement_appliquer)}</p>
+            </div>
+            <p style="color:#6b7280;font-size:13px;">
+              📎 Le document officiel signé est joint en PDF.
+              Veuillez vous rapprocher de l'administration pour récupérer l'avance.
+            </p>
+          </div>
+        `,
+        attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
+      }, 'Confirmation employé — avance finale');
+    }
+
+    // Send final PDF to Nesria (HR) only — after employee confirms
+    await sendEmailWithRetry({
+      from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+      to: SALARY_ADVANCE_HR,
+      subject: `✅ Avance CONFIRMÉE par l'employé — ${demande.nom} ${demande.prenom}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;">
+          <h2 style="color:#10b981;">✅ Avance sur salaire — Dossier complet</h2>
+          <div style="background:#f8fafc;padding:20px;border-radius:8px;margin:20px 0;">
+            <p><strong>Employé :</strong> ${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</p>
+            <p><strong>Montant accordé :</strong> <strong style="color:#2563eb;">${formatMontantTND(demande.montant_accorde)} TND</strong></p>
+            <p><strong>Remboursement :</strong> ${escapeHtml(demande.mode_remboursement_appliquer)}</p>
+            <p><strong>Signature demandeur :</strong> ${escapeHtml(demande.signature_demandeur)}</p>
+          </div>
+          <p style="color:#6b7280;font-size:13px;">
+            📎 Le PDF final (avec toutes les sections remplies) est joint. Dossier prêt pour traitement.
+          </p>
+        </div>
+      `,
+      attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
+    }, 'Avance confirmée — notification HR finale');
+
+    return res.json({
+      success: true,
+      message: 'Avance confirmée ! Le document final vous a été envoyé par email.'
+    });
+
+  } catch (err) {
+    console.error('❌ Erreur confirmation employé avance:', err);
+    res.status(500).json({ error: 'Erreur serveur: ' + err.message });
   }
 });
 
