@@ -822,9 +822,34 @@ async function genererPDFAvanceSalaire(demande) {
       line('Montant accordé :', demande.montant_accorde ? `${formatMontantTND(demande.montant_accorde)} TND` : '');
       line('Mode de remboursement à appliquer :', demande.mode_remboursement_appliquer || '');
       doc.moveDown(1.4);
-      doc.font('Helvetica-Bold').text('Signature Bénéficiaire :');
-      doc.font('Helvetica').fontSize(9)
-        .text('(avec mention : montant reçu et mode de remboursement accepté)');
+      doc.font('Helvetica-Bold').fontSize(11).text('Signature Bénéficiaire :');
+
+      if (demande.signature_confirmation_employe) {
+        try {
+          const base64Data = demande.signature_confirmation_employe.replace(/^data:image\/png;base64,/, '');
+          const signatureBuffer = Buffer.from(base64Data, 'base64');
+          const signatureY = doc.y + 10;
+
+          doc.rect(70, signatureY, 240, 90).stroke('#e5e7eb');
+          doc.image(signatureBuffer, 80, signatureY + 8, {
+            fit: [220, 70],
+            align: 'center',
+            valign: 'center'
+          });
+
+          doc.y = signatureY + 100;
+          doc.font('Helvetica').fontSize(9).fillColor('#555555')
+            .text(`Signé électroniquement le ${formatDateFR(demande.date_signature_confirmation || new Date())}`);
+          doc.fillColor('#000000').fontSize(11);
+        } catch (signatureError) {
+          console.error('⚠️ Erreur insertion signature employé dans PDF:', signatureError.message);
+          doc.font('Helvetica').fontSize(9)
+            .text('(signature électronique non lisible)');
+        }
+      } else {
+        doc.font('Helvetica').fontSize(9)
+          .text('(avec mention : montant reçu et mode de remboursement accepté)');
+      }
 
       const footerY = doc.page.height - 75;
       doc.fontSize(8).fillColor('#555555')
@@ -1578,6 +1603,71 @@ app.get('/avance-decision', async (req, res) => {
         <script>
           const DID = ${parseInt(id, 10)};
 
+          let hasSignature = false;
+          const canvas = document.getElementById('signaturePad');
+          const ctx = canvas.getContext('2d');
+          let drawing = false;
+
+          function resizeCanvas(){
+            const rect = canvas.getBoundingClientRect();
+            const oldImage = hasSignature ? canvas.toDataURL('image/png') : null;
+            canvas.width = rect.width;
+            canvas.height = 180;
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#111827';
+
+            if(oldImage){
+              const img = new Image();
+              img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              img.src = oldImage;
+            }
+          }
+
+          function getPos(e){
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches ? e.touches[0] : e;
+            return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+          }
+
+          function startDraw(e){
+            drawing = true;
+            hasSignature = true;
+            document.getElementById('e_signature').style.display='none';
+            const pos = getPos(e);
+            ctx.beginPath();
+            ctx.moveTo(pos.x, pos.y);
+            e.preventDefault();
+          }
+
+          function draw(e){
+            if(!drawing) return;
+            const pos = getPos(e);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+            e.preventDefault();
+          }
+
+          function stopDraw(){
+            drawing = false;
+            ctx.beginPath();
+          }
+
+          function clearSignature(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            hasSignature = false;
+          }
+
+          resizeCanvas();
+          window.addEventListener('resize', resizeCanvas);
+          canvas.addEventListener('mousedown', startDraw);
+          canvas.addEventListener('mousemove', draw);
+          canvas.addEventListener('mouseup', stopDraw);
+          canvas.addEventListener('mouseleave', stopDraw);
+          canvas.addEventListener('touchstart', startDraw, { passive:false });
+          canvas.addEventListener('touchmove', draw, { passive:false });
+          canvas.addEventListener('touchend', stopDraw);
+
           function lock(on){
             ['btnOk','btnNo','btnConfirmRefus'].forEach(id=>{
               const b=document.getElementById(id);
@@ -1912,6 +2002,10 @@ app.get('/avance-confirmation-employe', async (req, res) => {
           .checkbox-row{display:flex;align-items:flex-start;gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-top:16px}
           .checkbox-row input{margin-top:3px;width:18px;height:18px;cursor:pointer;flex-shrink:0}
           .checkbox-row label{font-size:14px;color:#374151;cursor:pointer;line-height:1.5}
+          .signature-box{margin-top:18px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px}
+          #signaturePad{width:100%;height:180px;border:2px dashed #94a3b8;border-radius:8px;background:white;cursor:crosshair;touch-action:none;display:block}
+          .clear-sign{margin-top:8px;padding:8px 14px;border:none;border-radius:6px;background:#64748b;color:white;cursor:pointer;font-weight:600}
+          .clear-sign:hover{background:#475569}
           .err{color:#ef4444;font-size:12px;margin-top:6px;display:none}
           .btn-row{display:flex;gap:12px;margin-top:24px}
           .btn{flex:1;padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;transition:all .2s}
@@ -1982,12 +2076,24 @@ app.get('/avance-confirmation-employe', async (req, res) => {
             </div>
             <div class="err" id="e_check">Veuillez cocher la case pour confirmer votre accord.</div>
 
+            <div class="sec-title">Signature employé</div>
+            <div class="signature-box">
+              <p style="font-size:13px;color:#374151;margin-bottom:8px;">
+                Veuillez signer ci-dessous avant d'accepter ou refuser.
+              </p>
+              <canvas id="signaturePad"></canvas>
+              <button type="button" class="clear-sign" onclick="clearSignature()">
+                Effacer la signature
+              </button>
+              <div class="err" id="e_signature">Veuillez signer avant de continuer.</div>
+            </div>
+
             <div class="btn-row">
               <button class="btn btn-accept" id="btnAccept" onclick="accepter()">
                 ✅ J'accepte les conditions
               </button>
               <button class="btn btn-decline" id="btnDecline" onclick="refuser()">
-                ❌ J’annule la demande
+                ❌ Je refuse
               </button>
             </div>
 
@@ -2021,13 +2127,22 @@ app.get('/avance-confirmation-employe', async (req, res) => {
               document.getElementById('e_check').style.display='block';
               return;
             }
+            if(!hasSignature){
+              document.getElementById('e_signature').style.display='block';
+              return;
+            }
             document.getElementById('e_check').style.display='none';
+            document.getElementById('e_signature').style.display='none';
             lock(true);
             try{
+              const signatureData = canvas.toDataURL('image/png');
               const r=await fetch('/api/demandes-avance-salaire/'+DID+'/confirmation-employe',{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({action:'accepter'})
+                body:JSON.stringify({
+                  action:'accepter',
+                  signature_confirmation_employe: signatureData
+                })
               });
               const data=await r.json();
               if(r.ok) done('approuve',data.message||'Le document final vous a été envoyé par email.');
@@ -2063,7 +2178,7 @@ app.get('/avance-confirmation-employe', async (req, res) => {
 
 app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, res) => {
   const { id } = req.params;
-  const { action } = req.body;
+  const { action, signature_confirmation_employe } = req.body;
 
   if (!['accepter', 'refuser'].includes(action)) {
     return res.status(400).json({ error: 'Action invalide' });
@@ -2125,12 +2240,22 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
     }
 
     // ---- EMPLOYEE ACCEPTS ----
+    if (!signature_confirmation_employe || !signature_confirmation_employe.startsWith('data:image/png;base64,')) {
+      return res.status(400).json({ error: 'Signature obligatoire' });
+    }
+
     await poolHR.query(
       `UPDATE demandes_avance_salaire
-       SET statut='approuve', updated_at=CURRENT_TIMESTAMP
-       WHERE id=$1`,
-      [id]
+       SET statut='approuve',
+           signature_confirmation_employe=$1,
+           date_signature_confirmation=CURRENT_TIMESTAMP,
+           updated_at=CURRENT_TIMESTAMP
+       WHERE id=$2`,
+      [signature_confirmation_employe, id]
     );
+
+    demande.signature_confirmation_employe = signature_confirmation_employe;
+    demande.date_signature_confirmation = new Date();
 
     // Generate FINAL PDF with everything filled in
     const pdfBuffer = await genererPDFAvanceSalaire(demande);
