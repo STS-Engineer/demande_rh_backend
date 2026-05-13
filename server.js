@@ -183,8 +183,8 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
-const SALARY_ADVANCE_MANAGER = 'fethi.chaouachi@avocarbon.com';
-const SALARY_ADVANCE_HR      = 'nesria.ibrahim@avocarbon.com';
+const SALARY_ADVANCE_MANAGER = 'rami.mejri@avocarbon.com';
+const SALARY_ADVANCE_HR      = 'rihem.arfaoui@avocarbon.com';
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
@@ -2099,72 +2099,136 @@ app.get('/avance-confirmation-employe', async (req, res) => {
 
           </div>
         </div>
-
         <script>
-          const DID = ${parseInt(id, 10)};
+  const DID = ${parseInt(id, 10)};
 
-          function lock(on){
-            ['btnAccept','btnDecline'].forEach(id=>{
-              const b=document.getElementById(id);
-              if(b) b.disabled=on;
-            });
-          }
+  // ── Signature pad setup ──────────────────────────────
+  const canvas = document.getElementById('signaturePad');
+  const ctx = canvas.getContext('2d');
+  let drawing = false;
+  let hasSignature = false;
 
-          function done(statut,msg){
-            document.querySelector('.body').innerHTML=\`
-              <div style="text-align:center;padding:50px 20px;">
-                <div style="font-size:60px;">\${statut==='approuve'?'✅':'🚫'}</div>
-                <h2 style="color:\${statut==='approuve'?'#10b981':'#ef4444'};margin:18px 0 10px;">
-                  \${statut==='approuve'?'Avance confirmée !':'Conditions refusées'}
-                </h2>
-                <p style="color:#64748b;font-size:14px;">\${msg}</p>
-              </div>
-            \`;
-          }
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const oldImage = hasSignature ? canvas.toDataURL('image/png') : null;
+    canvas.width = rect.width;
+    canvas.height = 180;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#111827';
+    if (oldImage) {
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      img.src = oldImage;
+    }
+  }
 
-          async function accepter(){
-            if(!document.getElementById('accepte').checked){
-              document.getElementById('e_check').style.display='block';
-              return;
-            }
-            if(!hasSignature){
-              document.getElementById('e_signature').style.display='block';
-              return;
-            }
-            document.getElementById('e_check').style.display='none';
-            document.getElementById('e_signature').style.display='none';
-            lock(true);
-            try{
-              const signatureData = canvas.toDataURL('image/png');
-              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/confirmation-employe',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({
-                  action:'accepter',
-                  signature_confirmation_employe: signatureData
-                })
-              });
-              const data=await r.json();
-              if(r.ok) done('approuve',data.message||'Le document final vous a été envoyé par email.');
-              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
-            }catch(e){alert('Erreur réseau');lock(false);}
-          }
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
 
-          async function refuser(){
-            if(!confirm('Êtes-vous sûr de vouloir refuser les conditions proposées ?\\nL\\'administration sera notifiée.')) return;
-            lock(true);
-            try{
-              const r=await fetch('/api/demandes-avance-salaire/'+DID+'/confirmation-employe',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({action:'refuser'})
-              });
-              const data=await r.json();
-              if(r.ok) done('refuse',data.message||'L\\'administration a été notifiée de votre refus.');
-              else{alert('Erreur : '+(data.error||'inconnue'));lock(false);}
-            }catch(e){alert('Erreur réseau');lock(false);}
-          }
-        </script>
+  function startDraw(e) {
+    drawing = true;
+    hasSignature = true;
+    document.getElementById('e_signature').style.display = 'none';
+    const pos = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+    e.preventDefault();
+  }
+
+  function draw(e) {
+    if (!drawing) return;
+    const pos = getPos(e);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    e.preventDefault();
+  }
+
+  function stopDraw() {
+    drawing = false;
+    ctx.beginPath();
+  }
+
+  function clearSignature() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    hasSignature = false;
+  }
+
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+  canvas.addEventListener('mousedown', startDraw);
+  canvas.addEventListener('mousemove', draw);
+  canvas.addEventListener('mouseup', stopDraw);
+  canvas.addEventListener('mouseleave', stopDraw);
+  canvas.addEventListener('touchstart', startDraw, { passive: false });
+  canvas.addEventListener('touchmove', draw, { passive: false });
+  canvas.addEventListener('touchend', stopDraw);
+  // ────────────────────────────────────────────────────
+
+  function lock(on) {
+    ['btnAccept', 'btnDecline'].forEach(id => {
+      const b = document.getElementById(id);
+      if (b) b.disabled = on;
+    });
+  }
+
+  function done(statut, msg) {
+    document.querySelector('.body').innerHTML = \`
+      <div style="text-align:center;padding:50px 20px;">
+        <div style="font-size:60px;">\${statut === 'approuve' ? '✅' : '🚫'}</div>
+        <h2 style="color:\${statut === 'approuve' ? '#10b981' : '#ef4444'};margin:18px 0 10px;">
+          \${statut === 'approuve' ? 'Avance confirmée !' : 'Conditions refusées'}
+        </h2>
+        <p style="color:#64748b;font-size:14px;">\${msg}</p>
+      </div>
+    \`;
+  }
+
+  async function accepter() {
+    if (!document.getElementById('accepte').checked) {
+      document.getElementById('e_check').style.display = 'block';
+      return;
+    }
+    if (!hasSignature) {
+      document.getElementById('e_signature').style.display = 'block';
+      return;
+    }
+    document.getElementById('e_check').style.display = 'none';
+    document.getElementById('e_signature').style.display = 'none';
+    lock(true);
+    try {
+      const signatureData = canvas.toDataURL('image/png');
+      const r = await fetch('/api/demandes-avance-salaire/' + DID + '/confirmation-employe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'accepter', signature_confirmation_employe: signatureData })
+      });
+      const data = await r.json();
+      if (r.ok) done('approuve', data.message || 'Le document final vous a été envoyé par email.');
+      else { alert('Erreur : ' + (data.error || 'inconnue')); lock(false); }
+    } catch (e) { alert('Erreur réseau'); lock(false); }
+  }
+
+  async function refuser() {
+    if (!confirm('Êtes-vous sûr de vouloir refuser les conditions proposées ?\nL\'administration sera notifiée.')) return;
+    lock(true);
+    try {
+      const r = await fetch('/api/demandes-avance-salaire/' + DID + '/confirmation-employe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'refuser' })
+      });
+      const data = await r.json();
+      if (r.ok) done('refuse', data.message || "L'administration a été notifiée de votre refus.");
+      else { alert('Erreur : ' + (data.error || 'inconnue')); lock(false); }
+    } catch (e) { alert('Erreur réseau'); lock(false); }
+  }
+</script>
+
+       
       </body>
       </html>
     `);
