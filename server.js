@@ -184,7 +184,7 @@ const BASE_URL = process.env.BASE_URL || 'https://hr-back.azurewebsites.net';
 const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de travail Modèle IA.docx');
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 const SALARY_ADVANCE_MANAGER = 'fethi.chaouachi@avocarbon.com';
-const SALARY_ADVANCE_HR      = 'nesria.ibrahim@avocarbon.com';
+const SALARY_ADVANCE_HR      = 'moufida.benammar@avocarbon.com';
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
