@@ -2103,70 +2103,109 @@ app.get('/avance-confirmation-employe', async (req, res) => {
   const DID = ${parseInt(id, 10)};
 
 // ── Signature pad setup ──────────────────────────────
-const canvas = document.getElementById('signaturePad');
-const ctx = canvas.getContext('2d');
+let canvas;
+let ctx;
 let drawing = false;
 let hasSignature = false;
 
+function initSignaturePad() {
+  canvas = document.getElementById('signaturePad');
+
+  if (!canvas) {
+    console.error('signaturePad canvas not found');
+    return;
+  }
+
+  ctx = canvas.getContext('2d');
+
+  resizeCanvas();
+
+  window.addEventListener('resize', resizeCanvas);
+
+  canvas.addEventListener('mousedown', startDraw);
+  canvas.addEventListener('mousemove', draw);
+  canvas.addEventListener('mouseup', stopDraw);
+  canvas.addEventListener('mouseleave', stopDraw);
+
+  canvas.addEventListener('touchstart', startDraw, { passive: false });
+  canvas.addEventListener('touchmove', draw, { passive: false });
+  canvas.addEventListener('touchend', stopDraw);
+}
+
 function resizeCanvas() {
+  if (!canvas || !ctx) return;
+
   const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0) return;          // ← GUARD ADDED
+  if (rect.width === 0) return;
+
   const oldImage = hasSignature ? canvas.toDataURL('image/png') : null;
+
   canvas.width = rect.width;
   canvas.height = 180;
+
   ctx.lineWidth = 2;
   ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
   ctx.strokeStyle = '#111827';
+
   if (oldImage) {
     const img = new Image();
-    img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    };
     img.src = oldImage;
   }
 }
 
 function getPos(e) {
   const rect = canvas.getBoundingClientRect();
-  const touch = e.touches ? e.touches[0] : e;
-  return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  const p = e.touches ? e.touches[0] : e;
+
+  return {
+    x: p.clientX - rect.left,
+    y: p.clientY - rect.top
+  };
 }
 
 function startDraw(e) {
+  e.preventDefault();
+
   drawing = true;
   hasSignature = true;
-  document.getElementById('e_signature').style.display = 'none';
+
+  const err = document.getElementById('e_signature');
+  if (err) err.style.display = 'none';
+
   const pos = getPos(e);
   ctx.beginPath();
   ctx.moveTo(pos.x, pos.y);
-  e.preventDefault();
 }
 
 function draw(e) {
   if (!drawing) return;
+
+  e.preventDefault();
+
   const pos = getPos(e);
   ctx.lineTo(pos.x, pos.y);
   ctx.stroke();
-  e.preventDefault();
 }
 
-function stopDraw() {
+function stopDraw(e) {
+  if (e) e.preventDefault();
+
   drawing = false;
   ctx.beginPath();
 }
 
 function clearSignature() {
+  if (!canvas || !ctx) return;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   hasSignature = false;
 }
 
-window.addEventListener('load', () => resizeCanvas());   // ← CHANGED from resizeCanvas()
-window.addEventListener('resize', resizeCanvas);
-canvas.addEventListener('mousedown', startDraw);
-canvas.addEventListener('mousemove', draw);
-canvas.addEventListener('mouseup', stopDraw);
-canvas.addEventListener('mouseleave', stopDraw);
-canvas.addEventListener('touchstart', startDraw, { passive: false });
-canvas.addEventListener('touchmove', draw, { passive: false });
-canvas.addEventListener('touchend', stopDraw);
+document.addEventListener('DOMContentLoaded', initSignaturePad);
 // ────────────────────────────────────────────────────
 
   function lock(on) {
@@ -2213,7 +2252,7 @@ function done(statut, msg) {
   }
 
   async function refuser() {
-    if (!confirm('Êtes-vous sûr de vouloir refuser les conditions proposées ?\nL\'administration sera notifiée.')) return;
+    if (!confirm("Êtes-vous sûr de vouloir refuser les conditions proposées ?\\nL'administration sera notifiée.")) return;
     lock(true);
     try {
       const r = await fetch('/api/demandes-avance-salaire/' + DID + '/confirmation-employe', {
