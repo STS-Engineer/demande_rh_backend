@@ -2397,6 +2397,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: SALARY_ADVANCE_HR,
+      cc: SALARY_ADVANCE_MANAGER,
       subject: `✅ Avance CONFIRMÉE par l'employé — ${demande.nom} ${demande.prenom}`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;">
