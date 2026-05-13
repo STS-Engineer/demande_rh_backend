@@ -2175,17 +2175,16 @@ canvas.addEventListener('touchend', stopDraw);
       if (b) b.disabled = on;
     });
   }
-
-  function done(statut, msg) {
-    document.querySelector('.body').innerHTML = \`
-      <div style="text-align:center;padding:50px 20px;">
-        <div style="font-size:60px;">\${statut === 'approuve' ? '✅' : '🚫'}</div>
-        <h2 style="color:\${statut === 'approuve' ? '#10b981' : '#ef4444'};margin:18px 0 10px;">
-          \${statut === 'approuve' ? 'Avance confirmée !' : 'Conditions refusées'}
-        </h2>
-        <p style="color:#64748b;font-size:14px;">\${msg}</p>
-      </div>
-    \`;
+function done(statut, msg) {
+    const ok = statut === 'approuve';
+    document.querySelector('.body').innerHTML =
+      '<div style="text-align:center;padding:50px 20px;">' +
+        '<div style="font-size:60px;">' + (ok ? '✅' : '🚫') + '</div>' +
+        '<h2 style="color:' + (ok ? '#10b981' : '#ef4444') + ';margin:18px 0 10px;">' +
+          (ok ? 'Avance confirm\u00e9e !' : 'Conditions refus\u00e9es') +
+        '</h2>' +
+        '<p style="color:#64748b;font-size:14px;">' + msg + '</p>' +
+      '</div>';
   }
 
   async function accepter() {
