@@ -2873,6 +2873,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: demande.adresse_mail,
+      cc: niveau == 2 && demande.mail_responsable1 ? demande.mail_responsable1 : undefined,
       subject: '✅ Votre demande RH a été approuvée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -2971,6 +2972,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: demande.adresse_mail,
+      cc: niveau == 2 && demande.mail_responsable1 ? demande.mail_responsable1 : undefined,
       subject: 'Votre demande RH a été refusée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
