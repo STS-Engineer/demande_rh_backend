@@ -1062,7 +1062,7 @@ async function sendAttendanceReport() {
         name: 'Administration STS',
         address: 'administration.STS@avocarbon.com'
       },
-      to: ['fethi.chaouachi@avocarbon.com','rami.mejri@avocarbon.com'],
+      to: ['rami.mejri@avocarbon.com'],
       subject: `Rapport de Présence — ${formatDateFR(today)}`,
       html: `
         <!DOCTYPE html>
@@ -3210,9 +3210,9 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('35 9 * * 1-5', async () => {
+  cron.schedule('42 8 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
-    //await sendAttendanceReport();
+    await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
   }, { timezone: "Africa/Tunis" });
 
