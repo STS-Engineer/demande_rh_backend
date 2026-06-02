@@ -3210,7 +3210,7 @@ app.get('/api/smtp-status', async (req, res) => {
 try {
   const cron = require('node-cron');
 
-  cron.schedule('42 8 * * 1-5', async () => {
+  cron.schedule('55 8 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
     await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
