@@ -186,7 +186,7 @@ const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de 
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 const SALARY_ADVANCE_MANAGER = 'fethi.chaouachi@avocarbon.com';
 const SALARY_ADVANCE_HR      = 'moufida.benammar@avocarbon.com';
-const RH_ADMIN_EMAIL = 'rihem.arfaoui@avocarbon.com';
+const RH_ADMIN_EMAIL = 'nesria.ibrahim@avocarbon.com';
 const DEMANDE_STATUS_ANNULEE = 'annulee';
 const CANCEL_TOKEN_SECRET =
   process.env.CANCEL_TOKEN_SECRET ||
@@ -3104,7 +3104,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
       await sendEmailWithRetry({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-        to: 'rihem.arfaoui@avocarbon.com',
+        to: 'nesria.ibrahim@avocarbon.com',
         subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
