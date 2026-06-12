@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
+const crypto = require('crypto');
 const createReport = require('docx-templates').default;
 const PDFDocument = require('pdfkit');
 require('dotenv').config();
@@ -185,6 +186,14 @@ const TEMPLATE_TRAVAIL_PATH = path.join(__dirname, 'templates', 'Attestation de 
 const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de salaire Modèle IA.docx');
 const SALARY_ADVANCE_MANAGER = 'fethi.chaouachi@avocarbon.com';
 const SALARY_ADVANCE_HR      = 'moufida.benammar@avocarbon.com';
+const RH_ADMIN_EMAIL = 'nesria.ibrahim@avocarbon.com';
+const DEMANDE_STATUS_ANNULEE = 'annulee';
+const CANCEL_TOKEN_SECRET =
+  process.env.CANCEL_TOKEN_SECRET ||
+  process.env.JWT_SECRET ||
+  process.env.SMTP_PASS ||
+  process.env.DB_PASS ||
+  'demande-rh-cancel-token-secret';
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
@@ -498,6 +507,177 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function getDemandeTypeLabel(typeDemande) {
+  if (typeDemande === 'conges' || typeDemande === 'congé') return 'Congé';
+  if (typeDemande === 'autorisation' || typeDemande === 'autorisation_absence') return 'Autorisation';
+  if (typeDemande === 'mission') return 'Mission';
+  return typeDemande || 'Demande RH';
+}
+
+function getDemandeCancelToken(demandeId) {
+  const signature = crypto
+    .createHmac('sha256', CANCEL_TOKEN_SECRET)
+    .update(`cancel-demande-rh:${demandeId}`)
+    .digest('hex');
+
+  return `${demandeId}.${signature}`;
+}
+
+function isValidDemandeCancelToken(demandeId, token) {
+  const [tokenDemandeId, signature] = String(token || '').split('.');
+  if (tokenDemandeId !== String(demandeId) || !signature || !/^[a-f0-9]{64}$/i.test(signature)) {
+    return false;
+  }
+
+  const expectedSignature = getDemandeCancelToken(demandeId).split('.')[1];
+  const received = Buffer.from(signature, 'hex');
+  const expected = Buffer.from(expectedSignature, 'hex');
+
+  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
+function getDemandeCancelUrl(demandeId) {
+  const token = getDemandeCancelToken(demandeId);
+  return `${BASE_URL.replace(/\/+$/, '')}/api/demandes/${encodeURIComponent(demandeId)}/annuler?token=${encodeURIComponent(token)}`;
+}
+
+function getDemandeEndDate(demande) {
+  const rawDate = demande?.date_retour || demande?.date_depart;
+  if (!rawDate) return null;
+
+  const date = new Date(rawDate);
+  if (Number.isNaN(date.getTime())) return null;
+
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function isDemandeCancellationAllowed(demande) {
+  if (!demande || demande.statut !== 'approuve') return false;
+
+  const endDate = getDemandeEndDate(demande);
+  if (!endDate) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return endDate >= today;
+}
+
+function getDemandeCancellationBlockReason(demande) {
+  if (!demande) return 'Demande introuvable.';
+  if (demande.statut === DEMANDE_STATUS_ANNULEE) return 'Cette demande est déjà annulée.';
+  if (demande.statut !== 'approuve') return `Cette demande ne peut pas être annulée car son statut actuel est "${demande.statut}".`;
+  if (!isDemandeCancellationAllowed(demande)) return 'Cette demande ne peut plus être annulée car sa période est déjà passée.';
+  return null;
+}
+
+function renderDemandeCancellationPage({ title, message, details = '', actionHtml = '', status = 200, color = '#2563eb' }) {
+  return {
+    status,
+    html: `
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${escapeHtml(title)}</title>
+        <style>
+          body { font-family: Arial, sans-serif; background: #f8fafc; color: #111827; margin: 0; padding: 32px 16px; }
+          .card { max-width: 640px; margin: 0 auto; background: white; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); overflow: hidden; }
+          .header { background: ${color}; color: white; padding: 24px; }
+          .header h1 { margin: 0; font-size: 24px; }
+          .content { padding: 24px; line-height: 1.6; }
+          .details { background: #f3f4f6; border-radius: 8px; padding: 16px; margin: 20px 0; }
+          .details p { margin: 6px 0; }
+          .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+          button, .link-button { border: 0; border-radius: 8px; padding: 12px 18px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
+          .danger { background: #dc2626; color: white; }
+          .secondary { background: #e5e7eb; color: #111827; }
+          .footer { color: #6b7280; font-size: 13px; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header"><h1>${escapeHtml(title)}</h1></div>
+          <div class="content">
+            <p>${escapeHtml(message)}</p>
+            ${details}
+            ${actionHtml}
+            <p class="footer">Ce lien est sécurisé et ne permet d'annuler que la demande concernée.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `
+  };
+}
+
+function getDemandeDetailsHtml(demande) {
+  return `
+    <div class="details">
+      <p><strong>Employé :</strong> ${escapeHtml(`${demande.nom || ''} ${demande.prenom || ''}`.trim())}</p>
+      <p><strong>Type :</strong> ${escapeHtml(getDemandeTypeLabel(demande.type_demande))}</p>
+      <p><strong>Motif :</strong> ${escapeHtml(demande.titre)}</p>
+      <p><strong>Date de départ :</strong> ${escapeHtml(formatDateShort(demande.date_depart))}</p>
+      ${demande.date_retour ? `<p><strong>Date de retour :</strong> ${escapeHtml(formatDateShort(demande.date_retour))}</p>` : ''}
+      ${demande.heure_depart ? `<p><strong>Heure de départ :</strong> ${escapeHtml(demande.heure_depart)}</p>` : ''}
+      ${demande.heure_retour ? `<p><strong>Heure de retour :</strong> ${escapeHtml(demande.heure_retour)}</p>` : ''}
+    </div>
+  `;
+}
+
+function getDemandeCancellationRecipients(demande) {
+  const recipients = [
+    RH_ADMIN_EMAIL,
+    demande.mail_responsable1,
+    demande.mail_responsable2
+  ];
+
+  return [...new Set(recipients.filter(Boolean))];
+}
+
+async function sendDemandeCancellationNotification(demande) {
+  const employeeName = `${demande.nom || ''} ${demande.prenom || ''}`.trim();
+
+  await sendEmailWithRetry({
+    from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+    to: getDemandeCancellationRecipients(demande),
+    subject: `Demande RH annulée - ${employeeName}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #dc2626; border-bottom: 3px solid #dc2626; padding-bottom: 10px;">Demande RH annulée</h2>
+        <div style="background: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc2626;">
+          <p>Une demande RH approuvée vient d'être annulée par l'employé.</p>
+        </div>
+        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <p><strong>Employé :</strong> ${escapeHtml(employeeName)}</p>
+          <p><strong>Matricule :</strong> ${escapeHtml(demande.matricule || 'Non spécifié')}</p>
+          <p><strong>Type :</strong> ${escapeHtml(getDemandeTypeLabel(demande.type_demande))}</p>
+          <p><strong>Motif :</strong> ${escapeHtml(demande.titre)}</p>
+          <p><strong>Date de départ :</strong> ${escapeHtml(formatDateShort(demande.date_depart))}</p>
+          ${demande.date_retour ? `<p><strong>Date de retour :</strong> ${escapeHtml(formatDateShort(demande.date_retour))}</p>` : ''}
+          ${demande.heure_depart ? `<p><strong>Heure de départ :</strong> ${escapeHtml(demande.heure_depart)}</p>` : ''}
+          ${demande.heure_retour ? `<p><strong>Heure de retour :</strong> ${escapeHtml(demande.heure_retour)}</p>` : ''}
+        </div>
+        <p style="color: #6b7280; font-size: 14px;">Le statut de la demande est maintenant : Demande annulée.</p>
+      </div>
+    `
+  }, 'Notification annulation demande RH');
+}
+
+async function getDemandeCancellationContext(id) {
+  const result = await poolHR.query(
+    `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule
+     FROM demande_rh d
+     JOIN employees e ON d.employe_id = e.id
+     WHERE d.id = $1`,
+    [id]
+  );
+
+  return result.rows[0] || null;
 }
 
 
@@ -2869,6 +3049,11 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     let approuveur = niveau == 1 && !demande.mail_responsable2 ? resp1 : niveau == 2 ? resp2 : null;
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
+    const canCancelFromEmail = isDemandeCancellationAllowed({
+      ...demande,
+      statut: 'approuve'
+    });
+    const cancelUrl = canCancelFromEmail ? getDemandeCancelUrl(id) : null;
 
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
@@ -2894,6 +3079,16 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
             ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
             ${approuveur ? `<p><strong>Approuvé par:</strong> ${approuveur.fullName}</p>` : ''}
           </div>
+          ${cancelUrl ? `
+            <div style="background: #fff7ed; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f97316;">
+              <p style="margin-top: 0; color: #9a3412;">
+                Si cette demande n'est plus valable, vous pouvez l'annuler tant que la période n'est pas passée.
+              </p>
+              <a href="${cancelUrl}" style="display: inline-block; background: #dc2626; color: #ffffff; padding: 12px 18px; border-radius: 8px; text-decoration: none; font-weight: bold;">
+                Annuler la demande
+              </a>
+            </div>
+          ` : ''}
         </div>
       `
     }, 'Approbation finale - Email employé');
@@ -2934,6 +3129,149 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   } catch (err) {
     console.error('❌ Erreur approbation demande:', err);
     res.status(500).json({ error: 'Erreur lors de l\'approbation' });
+  }
+});
+
+app.get('/api/demandes/:id/annuler', async (req, res) => {
+  const { id } = req.params;
+  const { token } = req.query;
+
+  try {
+    if (!isValidDemandeCancelToken(id, token)) {
+      const page = renderDemandeCancellationPage({
+        title: 'Lien invalide',
+        message: "Ce lien d'annulation est invalide.",
+        status: 403,
+        color: '#dc2626'
+      });
+      return res.status(page.status).send(page.html);
+    }
+
+    const demande = await getDemandeCancellationContext(id);
+    const blockReason = getDemandeCancellationBlockReason(demande);
+
+    if (blockReason) {
+      const page = renderDemandeCancellationPage({
+        title: 'Annulation impossible',
+        message: blockReason,
+        details: demande ? getDemandeDetailsHtml(demande) : '',
+        status: 400,
+        color: '#dc2626'
+      });
+      return res.status(page.status).send(page.html);
+    }
+
+    const confirmAction = `/api/demandes/${encodeURIComponent(id)}/annuler/confirm?token=${encodeURIComponent(token)}`;
+    const page = renderDemandeCancellationPage({
+      title: 'Confirmer l\'annulation',
+      message: 'Veuillez confirmer que vous souhaitez annuler cette demande RH approuvée.',
+      details: getDemandeDetailsHtml(demande),
+      actionHtml: `
+        <form method="POST" action="${escapeHtml(confirmAction)}" class="actions">
+          <button type="submit" class="danger">Confirmer l'annulation</button>
+          <a href="javascript:window.close();" class="link-button secondary">Fermer</a>
+        </form>
+      `,
+      color: '#f97316'
+    });
+
+    return res.status(page.status).send(page.html);
+  } catch (err) {
+    console.error('Erreur page annulation demande:', err);
+    const page = renderDemandeCancellationPage({
+      title: 'Erreur',
+      message: "Une erreur est survenue lors de la préparation de l'annulation.",
+      status: 500,
+      color: '#dc2626'
+    });
+    return res.status(page.status).send(page.html);
+  }
+});
+
+app.post('/api/demandes/:id/annuler/confirm', async (req, res) => {
+  const { id } = req.params;
+  const { token } = req.query;
+
+  try {
+    if (!isValidDemandeCancelToken(id, token)) {
+      const page = renderDemandeCancellationPage({
+        title: 'Lien invalide',
+        message: "Ce lien d'annulation est invalide.",
+        status: 403,
+        color: '#dc2626'
+      });
+      return res.status(page.status).send(page.html);
+    }
+
+    const demande = await getDemandeCancellationContext(id);
+    const blockReason = getDemandeCancellationBlockReason(demande);
+
+    if (blockReason) {
+      const page = renderDemandeCancellationPage({
+        title: 'Annulation impossible',
+        message: blockReason,
+        details: demande ? getDemandeDetailsHtml(demande) : '',
+        status: 400,
+        color: '#dc2626'
+      });
+      return res.status(page.status).send(page.html);
+    }
+
+    const updateResult = await poolHR.query(
+      `UPDATE demande_rh
+       SET statut = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+         AND statut = 'approuve'
+         AND COALESCE(date_retour, date_depart) >= CURRENT_DATE
+       RETURNING *`,
+      [DEMANDE_STATUS_ANNULEE, id]
+    );
+
+    if (updateResult.rows.length === 0) {
+      const refreshedDemande = await getDemandeCancellationContext(id);
+      const page = renderDemandeCancellationPage({
+        title: 'Annulation impossible',
+        message: getDemandeCancellationBlockReason(refreshedDemande) || "Cette demande ne peut plus être annulée.",
+        details: refreshedDemande ? getDemandeDetailsHtml(refreshedDemande) : '',
+        status: 400,
+        color: '#dc2626'
+      });
+      return res.status(page.status).send(page.html);
+    }
+
+    try {
+      await sendDemandeCancellationNotification({
+        ...demande,
+        ...updateResult.rows[0],
+        nom: demande.nom,
+        prenom: demande.prenom,
+        adresse_mail: demande.adresse_mail,
+        matricule: demande.matricule,
+        mail_responsable1: demande.mail_responsable1,
+        mail_responsable2: demande.mail_responsable2
+      });
+    } catch (emailErr) {
+      console.error('Erreur email notification annulation:', emailErr.message);
+    }
+
+    const page = renderDemandeCancellationPage({
+      title: 'Demande annulée',
+      message: 'Votre demande RH a été annulée avec succès. Le service RH et vos responsables ont été notifiés.',
+      details: getDemandeDetailsHtml({ ...demande, ...updateResult.rows[0], nom: demande.nom, prenom: demande.prenom }),
+      color: '#16a34a'
+    });
+
+    return res.status(page.status).send(page.html);
+  } catch (err) {
+    console.error('Erreur annulation demande:', err);
+    const page = renderDemandeCancellationPage({
+      title: 'Erreur',
+      message: "Une erreur est survenue lors de l'annulation de la demande.",
+      status: 500,
+      color: '#dc2626'
+    });
+    return res.status(page.status).send(page.html);
   }
 });
 
