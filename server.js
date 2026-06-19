@@ -18,7 +18,7 @@ app.use(cors({
     'http://localhost:3000'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant'],
   credentials: true
 }));
 app.options('*', cors());
@@ -187,6 +187,7 @@ const TEMPLATE_SALAIRE_PATH = path.join(__dirname, 'templates', 'Attestation de 
 const SALARY_ADVANCE_MANAGER = 'fethi.chaouachi@avocarbon.com';
 const SALARY_ADVANCE_HR      = 'moufida.benammar@avocarbon.com';
 const RH_ADMIN_EMAIL = 'nesria.ibrahim@avocarbon.com';
+const OTHER_PLANTS_FALLBACK_EMAIL = process.env.OTHER_PLANTS_FALLBACK_EMAIL || 'rami.mejri@avocarbon.com';
 const DEMANDE_STATUS_ANNULEE = 'annulee';
 const CANCEL_TOKEN_SECRET =
   process.env.CANCEL_TOKEN_SECRET ||
@@ -194,6 +195,101 @@ const CANCEL_TOKEN_SECRET =
   process.env.SMTP_PASS ||
   process.env.DB_PASS ||
   'demande-rh-cancel-token-secret';
+
+const TENANT_CONFIG = {
+  tunisia: {
+    key: 'tunisia',
+    schema: 'public',
+    aliases: ['tn', 'tunisia', 'tunisie', 'default', 'public'],
+    salaryAdvanceManagerEmail: SALARY_ADVANCE_MANAGER,
+    salaryAdvanceHrEmail: SALARY_ADVANCE_HR,
+    rhAdminEmail: RH_ADMIN_EMAIL
+  },
+  china: {
+    key: 'china',
+    schema: 'schema_cn',
+    aliases: ['cn', 'china', 'schema_cn'],
+    salaryAdvanceManagerEmail: process.env.CHINA_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.CHINA_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.CHINA_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  germany: {
+    key: 'germany',
+    schema: 'schema_de',
+    aliases: ['de', 'germany', 'deutschland', 'schema_de'],
+    salaryAdvanceManagerEmail: process.env.GERMANY_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.GERMANY_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.GERMANY_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  france: {
+    key: 'france',
+    schema: 'schema_fr',
+    aliases: ['fr', 'france', 'schema_fr'],
+    salaryAdvanceManagerEmail: process.env.FRANCE_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.FRANCE_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.FRANCE_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  india: {
+    key: 'india',
+    schema: 'schema_in',
+    aliases: ['in', 'india', 'schema_in'],
+    salaryAdvanceManagerEmail: process.env.INDIA_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.INDIA_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.INDIA_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  korea: {
+    key: 'korea',
+    schema: 'schema_kr',
+    aliases: ['kr', 'korea', 'south-korea', 'schema_kr'],
+    salaryAdvanceManagerEmail: process.env.KOREA_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.KOREA_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.KOREA_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  luxembourg: {
+    key: 'luxembourg',
+    schema: 'schema_lu',
+    aliases: ['lu', 'luxembourg', 'schema_lu'],
+    salaryAdvanceManagerEmail: process.env.LUXEMBOURG_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.LUXEMBOURG_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.LUXEMBOURG_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  },
+  mexico: {
+    key: 'mexico',
+    schema: 'schema_mx',
+    aliases: ['mx', 'mexico', 'schema_mx'],
+    salaryAdvanceManagerEmail: process.env.MEXICO_SALARY_ADVANCE_MANAGER_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    salaryAdvanceHrEmail: process.env.MEXICO_SALARY_ADVANCE_HR_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL,
+    rhAdminEmail: process.env.MEXICO_RH_ADMIN_EMAIL || OTHER_PLANTS_FALLBACK_EMAIL
+  }
+};
+
+function normalizeTenantKey(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  for (const config of Object.values(TENANT_CONFIG)) {
+    if (config.key === normalized || config.aliases.includes(normalized)) {
+      return config.key;
+    }
+  }
+  return TENANT_CONFIG.tunisia.key;
+}
+
+function getTenantConfig(req) {
+  const tenantCandidate =
+    req?.headers?.['x-tenant'] ||
+    req?.query?.tenant ||
+    req?.body?.tenant;
+
+  return TENANT_CONFIG[normalizeTenantKey(tenantCandidate)] || TENANT_CONFIG.tunisia;
+}
+
+function tableName(req, baseTableName) {
+  return `${getTenantConfig(req).schema}.${baseTableName}`;
+}
+
+function appendTenantParam(url, tenantKey) {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}tenant=${encodeURIComponent(normalizeTenantKey(tenantKey))}`;
+}
 
 function extraireNomPrenomDepuisEmail(email) {
   if (!email) return { prenom: '', nom: '', fullName: '' };
@@ -538,9 +634,12 @@ function isValidDemandeCancelToken(demandeId, token) {
   return received.length === expected.length && crypto.timingSafeEqual(received, expected);
 }
 
-function getDemandeCancelUrl(demandeId) {
+function getDemandeCancelUrl(demandeId, tenantKey = TENANT_CONFIG.tunisia.key) {
   const token = getDemandeCancelToken(demandeId);
-  return `${BASE_URL.replace(/\/+$/, '')}/api/demandes/${encodeURIComponent(demandeId)}/annuler?token=${encodeURIComponent(token)}`;
+  return appendTenantParam(
+    `${BASE_URL.replace(/\/+$/, '')}/api/demandes/${encodeURIComponent(demandeId)}/annuler?token=${encodeURIComponent(token)}`,
+    tenantKey
+  );
 }
 
 function getDemandeEndDate(demande) {
@@ -629,9 +728,10 @@ function getDemandeDetailsHtml(demande) {
   `;
 }
 
-function getDemandeCancellationRecipients(demande) {
+function getDemandeCancellationRecipients(demande, tenantKey = TENANT_CONFIG.tunisia.key) {
+  const tenant = TENANT_CONFIG[normalizeTenantKey(tenantKey)] || TENANT_CONFIG.tunisia;
   const recipients = [
-    RH_ADMIN_EMAIL,
+    tenant.rhAdminEmail,
     demande.mail_responsable1,
     demande.mail_responsable2
   ];
@@ -639,12 +739,12 @@ function getDemandeCancellationRecipients(demande) {
   return [...new Set(recipients.filter(Boolean))];
 }
 
-async function sendDemandeCancellationNotification(demande) {
+async function sendDemandeCancellationNotification(demande, tenantKey = TENANT_CONFIG.tunisia.key) {
   const employeeName = `${demande.nom || ''} ${demande.prenom || ''}`.trim();
 
   await sendEmailWithRetry({
     from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-    to: getDemandeCancellationRecipients(demande),
+    to: getDemandeCancellationRecipients(demande, tenantKey),
     subject: `Demande RH annulée - ${employeeName}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -668,11 +768,13 @@ async function sendDemandeCancellationNotification(demande) {
   }, 'Notification annulation demande RH');
 }
 
-async function getDemandeCancellationContext(id) {
+async function getDemandeCancellationContext(id, req) {
+  const demandesTable = tableName(req, 'demande_rh');
+  const employeesTable = tableName(req, 'employees');
   const result = await poolHR.query(
     `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule
-     FROM demande_rh d
-     JOIN employees e ON d.employe_id = e.id
+     FROM ${demandesTable} d
+     JOIN ${employeesTable} e ON d.employe_id = e.id
      WHERE d.id = $1`,
     [id]
   );
@@ -1384,11 +1486,11 @@ app.post('/api/attendance/send-report', async (req, res) => {
 
 app.get('/api/employees/actifs', async (req, res) => {
   try {
+    const employeesTable = tableName(req, 'employees');
     const result = await poolHR.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail, 
-              mail_responsable1, mail_responsable2, date_debut,
-              date_naissance, cin, salaire_brute
-       FROM employees 
+              mail_responsable1, mail_responsable2, date_debut
+       FROM ${employeesTable}
        WHERE date_depart IS NULL 
        ORDER BY nom, prenom`
     );
@@ -1404,6 +1506,8 @@ app.post('/api/generer-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
   try {
+    const tenant = getTenantConfig(req);
+    const employeesTable = tableName(req, 'employees');
     if (!employe_id || !type_document) {
       return res.status(400).json({ error: 'Les champs employé et type de document sont obligatoires' });
     }
@@ -1411,7 +1515,7 @@ app.post('/api/generer-attestation', async (req, res) => {
     const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, adresse_mail, date_debut, 
               date_naissance, cin, matricule, salaire_brute
-       FROM employees WHERE id = $1`,
+       FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
 
@@ -1439,7 +1543,7 @@ app.post('/api/generer-attestation', async (req, res) => {
 
     const mailOptions = {
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: 'fethi.chaouachi@avocarbon.com',
+      to: tenant.rhAdminEmail,
       subject: `Demande de ${documentTypeLabel.toLowerCase()} - ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -1476,11 +1580,12 @@ app.post('/api/telecharger-attestation', async (req, res) => {
   const { employe_id, type_document } = req.body;
 
   try {
+    const employeesTable = tableName(req, 'employees');
     if (!employe_id) return res.status(400).json({ error: 'ID employé requis' });
 
     const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, date_debut, date_naissance, cin, salaire_brute
-       FROM employees WHERE id = $1`,
+       FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
 
@@ -1532,9 +1637,12 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
   }
 
   try {
+    const tenant = getTenantConfig(req);
+    const employeesTable = tableName(req, 'employees');
+    const demandesAvanceTable = tableName(req, 'demandes_avance_salaire');
     const employeResult = await poolHR.query(
       `SELECT id, matricule, nom, prenom, poste, adresse_mail
-       FROM employees WHERE id = $1`,
+       FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
     if (employeResult.rows.length === 0) {
@@ -1543,7 +1651,7 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
     const employe = employeResult.rows[0];
 
     const insertResult = await poolHR.query(
-      `INSERT INTO demandes_avance_salaire
+      `INSERT INTO ${demandesAvanceTable}
        (employe_id, titre_motif, montant_demande, mode_remboursement_souhaite,
         signature_demandeur, acceptation_responsabilite, statut)
        VALUES ($1, $2, $3, $4, $5, $6, 'en_attente_admin')
@@ -1553,7 +1661,7 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
     );
 
     const demandeId = insertResult.rows[0].id;
-    const decisionLink = `${BASE_URL}/avance-decision?id=${demandeId}`;
+    const decisionLink = appendTenantParam(`${BASE_URL}/avance-decision?id=${demandeId}`, tenant.key);
 
     // Send initial PDF (employee's request only — admin section blank)
     const demande = { ...insertResult.rows[0], ...employe };
@@ -1563,7 +1671,7 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
     // Email to manager (Fethi only) with decision link
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: SALARY_ADVANCE_MANAGER,
+      to: tenant.salaryAdvanceManagerEmail,
       subject: `Demande d'avance sur salaire — ${employe.nom} ${employe.prenom}`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;">
@@ -1631,10 +1739,13 @@ app.get('/avance-decision', async (req, res) => {
   if (!id) return res.status(400).send('<h1>ID manquant</h1>');
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesAvanceTable = tableName(req, 'demandes_avance_salaire');
+    const employeesTable = tableName(req, 'employees');
     const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
-       FROM demandes_avance_salaire d
-       JOIN employees e ON d.employe_id = e.id
+       FROM ${demandesAvanceTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -1782,6 +1893,7 @@ app.get('/avance-decision', async (req, res) => {
 
         <script>
           const DID = ${parseInt(id, 10)};
+          const TENANT = ${JSON.stringify(tenant.key)};
 
           let hasSignature = false;
           const canvas = document.getElementById('signaturePad');
@@ -1887,7 +1999,7 @@ app.get('/avance-decision', async (req, res) => {
             try{
               const r=await fetch('/api/demandes-avance-salaire/'+DID+'/decision-manager',{
                 method:'POST',
-                headers:{'Content-Type':'application/json'},
+                headers:{'Content-Type':'application/json','X-Tenant':TENANT},
                 body:JSON.stringify({action:'approuver',montant_accorde:montant,mode_remboursement_appliquer:mode})
               });
               const data=await r.json();
@@ -1904,7 +2016,7 @@ app.get('/avance-decision', async (req, res) => {
             try{
               const r=await fetch('/api/demandes-avance-salaire/'+DID+'/decision-manager',{
                 method:'POST',
-                headers:{'Content-Type':'application/json'},
+                headers:{'Content-Type':'application/json','X-Tenant':TENANT},
                 body:JSON.stringify({action:'refuser',commentaire_refus:commentaire})
               });
               const data=await r.json();
@@ -1933,10 +2045,13 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
   }
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesAvanceTable = tableName(req, 'demandes_avance_salaire');
+    const employeesTable = tableName(req, 'employees');
     const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
-       FROM demandes_avance_salaire d
-       JOIN employees e ON d.employe_id = e.id
+       FROM ${demandesAvanceTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -1957,7 +2072,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
       if (!commentaire) return res.status(400).json({ error: 'Motif du refus obligatoire' });
 
       await poolHR.query(
-        `UPDATE demandes_avance_salaire
+        `UPDATE ${demandesAvanceTable}
          SET statut='refuse_admin', commentaire_refus=$1, updated_at=CURRENT_TIMESTAMP
          WHERE id=$2`,
         [commentaire, id]
@@ -2003,7 +2118,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
 
     // Save manager's proposed terms, move to awaiting employee confirmation
     await poolHR.query(
-      `UPDATE demandes_avance_salaire
+      `UPDATE ${demandesAvanceTable}
        SET statut='en_attente_employe',
            montant_accorde=$1,
            mode_remboursement_appliquer=$2,
@@ -2017,7 +2132,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
     const modeModifie = mode.trim() !== demande.mode_remboursement_souhaite.trim();
     const termsChanged = montantModifie || modeModifie;
 
-    const confirmLink = `${BASE_URL}/avance-confirmation-employe?id=${id}`;
+    const confirmLink = appendTenantParam(`${BASE_URL}/avance-confirmation-employe?id=${id}`, tenant.key);
 
     // Email to employee with manager's decision — they must accept or reject
     if (demande.adresse_mail) {
@@ -2112,10 +2227,13 @@ app.get('/avance-confirmation-employe', async (req, res) => {
   if (!id) return res.status(400).send('<h1>ID manquant</h1>');
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesAvanceTable = tableName(req, 'demandes_avance_salaire');
+    const employeesTable = tableName(req, 'employees');
     const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
-       FROM demandes_avance_salaire d
-       JOIN employees e ON d.employe_id = e.id
+       FROM ${demandesAvanceTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -2422,7 +2540,7 @@ function done(statut, msg) {
       const signatureData = canvas.toDataURL('image/png');
       const r = await fetch('/api/demandes-avance-salaire/' + DID + '/confirmation-employe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Tenant': TENANT },
         body: JSON.stringify({ action: 'accepter', signature_confirmation_employe: signatureData })
       });
       const data = await r.json();
@@ -2437,7 +2555,7 @@ function done(statut, msg) {
     try {
       const r = await fetch('/api/demandes-avance-salaire/' + DID + '/confirmation-employe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Tenant': TENANT },
         body: JSON.stringify({ action: 'refuser' })
       });
       const data = await r.json();
@@ -2468,10 +2586,13 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
   }
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesAvanceTable = tableName(req, 'demandes_avance_salaire');
+    const employeesTable = tableName(req, 'employees');
     const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail
-       FROM demandes_avance_salaire d
-       JOIN employees e ON d.employe_id = e.id
+       FROM ${demandesAvanceTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -2489,7 +2610,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
     // ---- EMPLOYEE REFUSES MANAGER'S TERMS ----
     if (action === 'refuser') {
       await poolHR.query(
-        `UPDATE demandes_avance_salaire
+        `UPDATE ${demandesAvanceTable}
          SET statut='refuse_employe', updated_at=CURRENT_TIMESTAMP
          WHERE id=$1`,
         [id]
@@ -2498,7 +2619,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
       // Notify Fethi that employee rejected his terms
       await sendEmailWithRetry({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-        to: SALARY_ADVANCE_MANAGER,
+        to: tenant.salaryAdvanceManagerEmail,
         subject: `🚫 Avance refusée par l'employé — ${demande.nom} ${demande.prenom}`,
         html: `
           <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
@@ -2528,7 +2649,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
     }
 
     await poolHR.query(
-      `UPDATE demandes_avance_salaire
+      `UPDATE ${demandesAvanceTable}
        SET statut='approuve',
            signature_confirmation_employe=$1,
            date_signature_confirmation=CURRENT_TIMESTAMP,
@@ -2576,8 +2697,8 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
     // Send final PDF to Nesria (HR) only — after employee confirms
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: SALARY_ADVANCE_HR,
-      cc: SALARY_ADVANCE_MANAGER,
+      to: tenant.salaryAdvanceHrEmail,
+      cc: tenant.salaryAdvanceManagerEmail,
       subject: `✅ Avance CONFIRMÉE par l'employé — ${demande.nom} ${demande.prenom}`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;">
@@ -2615,13 +2736,16 @@ app.post('/api/demandes', async (req, res) => {
   } = req.body;
 
   try {
+    const tenant = getTenantConfig(req);
+    const employeesTable = tableName(req, 'employees');
+    const demandesTable = tableName(req, 'demande_rh');
     if (!employe_id || !type_demande || !titre || !date_depart) {
       return res.status(400).json({ error: 'Les champs employé, type de demande, titre et date de départ sont obligatoires' });
     }
 
     const employeResult = await poolHR.query(
       `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
-       FROM employees WHERE id = $1`,
+       FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
 
@@ -2639,7 +2763,7 @@ app.post('/api/demandes', async (req, res) => {
     const nombreJoursFinal = nombre_jours ? parseFloat(nombre_jours) : null;
 
     const insertResult = await poolHR.query(
-      `INSERT INTO demande_rh 
+      `INSERT INTO ${demandesTable} 
        (employe_id, type_demande, titre, date_depart, date_retour, 
         heure_depart, heure_retour, demi_journee, type_conge, type_conge_autre, frais_deplacement, nombre_jours, statut)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -2672,7 +2796,7 @@ app.post('/api/demandes', async (req, res) => {
         type_conge_autre: typeCongeAutreFinal,
         frais_deplacement: fraisDeplacementFinal,
         nombre_jours: nombreJoursFinal
-      });
+      }, null, tenant.key);
 
       console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email to responsable1 result:`, JSON.stringify(emailResult));
     } else {
@@ -2686,7 +2810,7 @@ app.post('/api/demandes', async (req, res) => {
   }
 });
 
-async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null) {
+async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niveau, details, premierResponsable = null, tenantKey = TENANT_CONFIG.tunisia.key) {
 
   console.log(`\n📨 [DEBUG][envoyerEmailResponsable] Called:`);
   console.log(`   Employee    : ${employe.nom} ${employe.prenom}`);
@@ -2696,7 +2820,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   console.log(`   employe.id  : ${employe.id || employe.employe_id || 'UNDEFINED'}`);
 
   const baseUrl = BASE_URL;
-  const lienApprobation = `${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`;
+  const lienApprobation = appendTenantParam(`${baseUrl}/approuver-demande?id=${demandeId}&niveau=${niveau}`, tenantKey);
 
   let typeLabel = details.type_demande === 'conges' ? 'Congé' :
     details.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
@@ -2708,7 +2832,8 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
     console.log(`   [DEBUG] employeeId for leave balance lookup: ${employeeId}`);
 
     if (employeeId) {
-      const lb = await poolHR.query(`SELECT balance FROM leave_balances WHERE employee_id = $1`, [employeeId]);
+      const leaveBalancesTable = `${(TENANT_CONFIG[normalizeTenantKey(tenantKey)] || TENANT_CONFIG.tunisia).schema}.leave_balances`;
+      const lb = await poolHR.query(`SELECT balance FROM ${leaveBalancesTable} WHERE employee_id = $1`, [employeeId]);
 
       console.log(`   [DEBUG] Leave balance query returned ${lb.rows.length} row(s): ${lb.rows.length > 0 ? lb.rows[0].balance : 'none'}`);
 
@@ -2806,13 +2931,17 @@ app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesTable = tableName(req, 'demande_rh');
+    const employeesTable = tableName(req, 'employees');
+    const leaveBalancesTable = tableName(req, 'leave_balances');
     const result = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
               e.mail_responsable1, e.mail_responsable2,
               COALESCE(lb.balance, 0.000) AS solde_conge
-       FROM demande_rh d
-       JOIN employees e ON d.employe_id = e.id
-       LEFT JOIN leave_balances lb ON lb.employee_id = e.id
+       FROM ${demandesTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
+       LEFT JOIN ${leaveBalancesTable} lb ON lb.employee_id = e.id
        WHERE d.id = $1`,
       [id]
     );
@@ -2909,6 +3038,7 @@ app.get('/approuver-demande', async (req, res) => {
         <script>
           const demandeId = ${id};
           const niveau = ${Number(niveau) || 1};
+          const TENANT = ${JSON.stringify(tenant.key)};
           function setProcessing(isProcessing) {
             ['approveBtn','rejectBtn','confirmRefus'].forEach(id => {
               const btn = document.getElementById(id);
@@ -2940,7 +3070,7 @@ app.get('/approuver-demande', async (req, res) => {
             try {
               const response = await fetch('/api/demandes/' + demandeId + '/approuver', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-Tenant': TENANT },
                 body: JSON.stringify({ niveau })
               });
               if (response.ok) {
@@ -2959,7 +3089,7 @@ app.get('/approuver-demande', async (req, res) => {
             try {
               const response = await fetch('/api/demandes/' + demandeId + '/refuser', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-Tenant': TENANT },
                 body: JSON.stringify({ niveau, commentaire })
               });
               if (response.ok) {
@@ -2994,9 +3124,12 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
   const { niveau } = req.body;
 
   try {
+    const tenant = getTenantConfig(req);
+    const demandesTable = tableName(req, 'demande_rh');
+    const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule
-       FROM demande_rh d JOIN employees e ON d.employe_id = e.id WHERE d.id = $1`,
+       FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
 
@@ -3008,7 +3141,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     if (demande.statut !== 'en_attente') return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
 
     const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    await poolHR.query(`UPDATE demande_rh SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+    await poolHR.query(`UPDATE ${demandesTable} SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
 
     const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
     const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
@@ -3039,12 +3172,12 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         demi_journee: demande.demi_journee, type_conge: demande.type_conge,
         type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement,
         nombre_jours: demande.nombre_jours
-      }, resp1 ? resp1.fullName : 'le premier responsable');
+      }, resp1 ? resp1.fullName : 'le premier responsable', tenant.key);
 
       return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
     }
 
-    await poolHR.query(`UPDATE demande_rh SET statut = 'approuve' WHERE id = $1`, [id]);
+    await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve' WHERE id = $1`, [id]);
 
     let approuveur = niveau == 1 && !demande.mail_responsable2 ? resp1 : niveau == 2 ? resp2 : null;
     const typeCongeLabel = demande.type_demande === 'conges'
@@ -3053,7 +3186,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       ...demande,
       statut: 'approuve'
     });
-    const cancelUrl = canCancelFromEmail ? getDemandeCancelUrl(id) : null;
+    const cancelUrl = canCancelFromEmail ? getDemandeCancelUrl(id, tenant.key) : null;
 
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
@@ -3104,7 +3237,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
 
       await sendEmailWithRetry({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-        to: 'nesria.ibrahim@avocarbon.com',
+        to: tenant.rhAdminEmail,
         subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -3147,7 +3280,7 @@ app.get('/api/demandes/:id/annuler', async (req, res) => {
       return res.status(page.status).send(page.html);
     }
 
-    const demande = await getDemandeCancellationContext(id);
+    const demande = await getDemandeCancellationContext(id, req);
     const blockReason = getDemandeCancellationBlockReason(demande);
 
     if (blockReason) {
@@ -3203,7 +3336,9 @@ app.post('/api/demandes/:id/annuler/confirm', async (req, res) => {
       return res.status(page.status).send(page.html);
     }
 
-    const demande = await getDemandeCancellationContext(id);
+    const tenant = getTenantConfig(req);
+    const demandesTable = tableName(req, 'demande_rh');
+    const demande = await getDemandeCancellationContext(id, req);
     const blockReason = getDemandeCancellationBlockReason(demande);
 
     if (blockReason) {
@@ -3218,7 +3353,7 @@ app.post('/api/demandes/:id/annuler/confirm', async (req, res) => {
     }
 
     const updateResult = await poolHR.query(
-      `UPDATE demande_rh
+      `UPDATE ${demandesTable}
        SET statut = $1,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $2
@@ -3229,7 +3364,7 @@ app.post('/api/demandes/:id/annuler/confirm', async (req, res) => {
     );
 
     if (updateResult.rows.length === 0) {
-      const refreshedDemande = await getDemandeCancellationContext(id);
+      const refreshedDemande = await getDemandeCancellationContext(id, req);
       const page = renderDemandeCancellationPage({
         title: 'Annulation impossible',
         message: getDemandeCancellationBlockReason(refreshedDemande) || "Cette demande ne peut plus être annulée.",
@@ -3250,7 +3385,7 @@ app.post('/api/demandes/:id/annuler/confirm', async (req, res) => {
         matricule: demande.matricule,
         mail_responsable1: demande.mail_responsable1,
         mail_responsable2: demande.mail_responsable2
-      });
+      }, tenant.key);
     } catch (emailErr) {
       console.error('Erreur email notification annulation:', emailErr.message);
     }
@@ -3280,9 +3415,11 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
   const { niveau, commentaire } = req.body;
 
   try {
+    const demandesTable = tableName(req, 'demande_rh');
+    const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
       `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
-       FROM demande_rh d JOIN employees e ON d.employe_id = e.id WHERE d.id = $1`,
+       FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
 
@@ -3293,7 +3430,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     await poolHR.query(
-      `UPDATE demande_rh SET statut = 'refuse', commentaire_refus = $1, ${colonneRefus} = false, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      `UPDATE ${demandesTable} SET statut = 'refuse', commentaire_refus = $1, ${colonneRefus} = false, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
       [commentaire, id]
     );
 
@@ -3335,8 +3472,9 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
 
 app.get('/api/demandes/employe/:id', async (req, res) => {
   try {
+    const demandesTable = tableName(req, 'demande_rh');
     const result = await poolHR.query(
-      `SELECT * FROM demande_rh WHERE employe_id = $1 ORDER BY created_at DESC`,
+      `SELECT * FROM ${demandesTable} WHERE employe_id = $1 ORDER BY created_at DESC`,
       [req.params.id]
     );
     res.json(result.rows);
