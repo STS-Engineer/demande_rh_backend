@@ -189,6 +189,9 @@ const SALARY_ADVANCE_HR      = 'moufida.benammar@avocarbon.com';
 const RH_ADMIN_EMAIL = 'nesria.ibrahim@avocarbon.com';
 const OTHER_PLANTS_FALLBACK_EMAIL = process.env.OTHER_PLANTS_FALLBACK_EMAIL || 'rami.mejri@avocarbon.com';
 const DEMANDE_STATUS_ANNULEE = 'annulee';
+const DEMANDE_STATUS_TRANSMIS_SAGE = 'transmis_sage';
+const DEMANDE_STATUS_REFUSE = 'refuse';
+const DEMANDE_STATUS_APPOUVEE = 'approuve';
 const CANCEL_TOKEN_SECRET =
   process.env.CANCEL_TOKEN_SECRET ||
   process.env.JWT_SECRET ||
@@ -284,6 +287,207 @@ function getTenantConfig(req) {
 
 function tableName(req, baseTableName) {
   return `${getTenantConfig(req).schema}.${baseTableName}`;
+}
+
+function normalizeText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizePlantKey(value) {
+  const normalized = normalizeText(value)
+    .replace(/[\u00e0\u00e1\u00e2\u00e3\u00e4\u00e5]/g, 'a')
+    .replace(/[\u00e8\u00e9\u00ea\u00eb]/g, 'e')
+    .replace(/[\u00ec\u00ed\u00ee\u00ef]/g, 'i')
+    .replace(/[\u00f2\u00f3\u00f4\u00f5\u00f6]/g, 'o')
+    .replace(/[\u00f9\u00fa\u00fb\u00fc]/g, 'u');
+
+  if (['cyclam', 'poitiers'].includes(normalized)) return normalized;
+  if (['assymex'].includes(normalized)) return 'assymex';
+  if (['avocarbon india', 'india', 'in'].includes(normalized)) return 'india';
+  if (['avocarbon kunshan', 'kunshan', 'china', 'cn'].includes(normalized)) return 'kunshan';
+  if (['avocarbon germany', 'germany', 'deutschland', 'de'].includes(normalized)) return 'germany';
+  if (['avocarbon tianjin', 'tianjin'].includes(normalized)) return 'tianjin';
+  return normalized;
+}
+
+function getEmployeePlant(employee) {
+  return normalizePlantKey(employee?.site_dep || employee?.plant || employee?.site || employee?.site_dep_name);
+}
+
+function getRequestTypeKey(value) {
+  return normalizeText(value);
+}
+
+function getApproverRoleLabel(role) {
+  const labels = {
+    supervisor: 'direct supervisor',
+    plant_director: 'plant director',
+    hierarchical_manager: 'hierarchical manager',
+    department_manager: 'department manager',
+    plant_manager: 'plant manager',
+    manager: 'manager',
+    hr_manager: 'HR manager',
+    team_leader: 'team leader',
+    hr_notification: 'HR'
+  };
+  return labels[role] || role;
+}
+
+function getApproverEmailFromEmployee(employee, role) {
+  const fallback = [];
+  if (employee?.mail_responsable1) fallback.push(employee.mail_responsable1);
+  if (employee?.mail_responsable2) fallback.push(employee.mail_responsable2);
+
+  const explicit = {
+    supervisor: employee?.mail_responsable1,
+    plant_director: employee?.mail_responsable2,
+    hierarchical_manager: employee?.mail_responsable2,
+    department_manager: employee?.mail_responsable2,
+    plant_manager: employee?.mail_responsable2,
+    manager: employee?.mail_responsable2,
+    hr_manager: employee?.mail_responsable2,
+    team_leader: employee?.mail_responsable1,
+    hr_notification: null
+  }[role];
+
+  return explicit || fallback[0] || null;
+}
+
+function getTenantWorkflowMode(tenantKey) {
+  const key = normalizeTenantKey(tenantKey);
+  if (key === 'germany') return 'sage';
+  if (key === 'tunisia') return 'tunisia';
+  return 'plant_based';
+}
+
+function getPlantWorkflow(employee, requestType) {
+  const plant = getEmployeePlant(employee);
+  const requestKey = getRequestTypeKey(requestType);
+  const grade = normalizeText(employee?.grade || employee?.grade_level || employee?.niveau || employee?.job_grade);
+
+  if (plant === 'tianjin') {
+    const isOfficeStaff = ['office', 'office staff', 'staff office'].includes(grade);
+    const isManager = ['manager', 'managers'].includes(grade);
+    const isDirectIndirect = ['direct', 'indirect', 'direct staff', 'indirect staff'].includes(grade);
+
+    if (isManager) {
+      return [
+        { role: 'plant_manager', required: true, notifyHr: true }
+      ];
+    }
+
+    if (isOfficeStaff && requestKey === 'conges') {
+      return [
+        { role: 'supervisor', required: true },
+        { role: 'manager', required: true, notifyHr: true, notifyPlantManagerOn3Days: true }
+      ];
+    }
+
+    if (isDirectIndirect && requestKey === 'conges') {
+      return [
+        { role: 'team_leader', required: true },
+        { role: 'supervisor', required: true },
+        { role: 'manager', required: true, notifyHr: true, notifyPlantManagerOn3Days: true }
+      ];
+    }
+
+    return [
+      { role: 'supervisor', required: true },
+      { role: 'manager', required: true, notifyHr: true }
+    ];
+  }
+
+  if (['cyclam', 'poitiers'].includes(plant)) {
+    return [
+      { role: 'supervisor', required: true },
+      { role: 'hr_notification', required: true, notifyHr: true }
+    ];
+  }
+
+  if (plant === 'assymex') {
+    return [
+      { role: 'supervisor', required: true },
+      { role: 'plant_director', required: true },
+      { role: 'hr_notification', required: true, notifyHr: true }
+    ];
+  }
+
+  if (plant === 'india') {
+    return [
+      { role: 'supervisor', required: true },
+      { role: 'hierarchical_manager', required: true },
+      { role: 'hr_notification', required: true, notifyHr: true }
+    ];
+  }
+
+  if (plant === 'kunshan') {
+    return [
+      { role: 'supervisor', required: true },
+      { role: 'department_manager', required: true },
+      { role: 'hr_notification', required: true, notifyHr: true }
+    ];
+  }
+
+  return null;
+}
+
+function getPlantWorkflowStepCountForFinalApproval(workflow, requestType, employee, requestData) {
+  if (!workflow || !workflow.length) return 0;
+  const plant = getEmployeePlant(employee);
+  if (plant !== 'tianjin' || getRequestTypeKey(requestType) !== 'conges') return workflow.length;
+  const days = Number(requestData?.nombre_jours || 0);
+  const grade = normalizeText(employee?.grade || employee?.grade_level || employee?.niveau || employee?.job_grade);
+  const isOfficeStaff = ['office', 'office staff', 'staff office'].includes(grade);
+  const isDirectIndirect = ['direct', 'indirect', 'direct staff', 'indirect staff'].includes(grade);
+  if (grade === 'manager') return 1;
+  if (isOfficeStaff) return days >= 3 ? 3 : 2;
+  if (isDirectIndirect) return days <= 1 ? 3 : days <= 2 ? 4 : 5;
+  return workflow.length;
+}
+
+function resolveRequestWorkflow(tenantKey, employee, requestData) {
+  const mode = getTenantWorkflowMode(tenantKey);
+  if (mode === 'sage') {
+    return { mode };
+  }
+  if (mode === 'tunisia') {
+    return { mode, legacy: true };
+  }
+
+  const workflow = getPlantWorkflow(employee, requestData?.type_demande);
+  if (!workflow) {
+    return { mode, legacy: true };
+  }
+
+  const finalStepCount = getPlantWorkflowStepCountForFinalApproval(workflow, requestData?.type_demande, employee, requestData);
+  return { mode, workflow, finalStepCount };
+}
+
+function buildWorkflowState(workflowResolution) {
+  if (!workflowResolution?.workflow) return null;
+  return {
+    workflow: workflowResolution.workflow,
+    totalSteps: workflowResolution.finalStepCount || workflowResolution.workflow.length,
+    currentStep: 1
+  };
+}
+
+function getWorkflowStepStatusLabel(stepIndex, workflowState) {
+  if (!workflowState) return '';
+  if (stepIndex + 1 < workflowState.totalSteps) return 'en_attente';
+  return DEMANDE_STATUS_APPOUVEE;
+}
+
+function getRequestNextApprover(workflowState, approverFlags, employee, requestType, requestData) {
+  if (!workflowState) return null;
+  const steps = workflowState.workflow.slice(0, workflowState.totalSteps);
+  for (let index = 0; index < steps.length; index++) {
+    const flag = steps[index].role === 'hr_notification' ? null : (index === 0 ? 'approuve_responsable1' : 'approuve_responsable2');
+    if (flag && !approverFlags[flag]) {
+      return { step: steps[index], index };
+    }
+  }
+  return null;
 }
 
 function appendTenantParam(url, tenantKey) {
@@ -2744,7 +2948,7 @@ app.post('/api/demandes', async (req, res) => {
     }
 
     const employeResult = await poolHR.query(
-      `SELECT nom, prenom, poste, adresse_mail, mail_responsable1, mail_responsable2
+      `SELECT nom, prenom, poste, grade, site_dep, adresse_mail, mail_responsable1, mail_responsable2
        FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
@@ -2753,6 +2957,21 @@ app.post('/api/demandes', async (req, res) => {
 
     const employe = employeResult.rows[0];
     employe.id = employe_id;
+
+    const workflowResolution = resolveRequestWorkflow(tenant.key, employe, {
+      type_demande,
+      nombre_jours,
+      date_depart,
+      date_retour
+    });
+
+    if (workflowResolution.mode === 'sage') {
+      return res.json({
+        success: true,
+        message: 'Demande reçue. Pour ce tenant, le traitement est géré automatiquement dans SAGE.',
+        workflow: 'sage'
+      });
+    }
 
     const dateRetourFinal = date_retour && date_retour !== '' ? date_retour : null;
     const heureDepartFinal = heure_depart && heure_depart !== '' ? heure_depart : null;
@@ -2774,6 +2993,19 @@ app.post('/api/demandes', async (req, res) => {
     );
 
     const demandeId = insertResult.rows[0].id;
+    const requestPayload = {
+      type_demande,
+      titre,
+      date_depart,
+      date_retour: dateRetourFinal,
+      heure_depart: heureDepartFinal,
+      heure_retour: heureRetourFinal,
+      demi_journee,
+      type_conge: typeCongeFinal,
+      type_conge_autre: typeCongeAutreFinal,
+      frais_deplacement: fraisDeplacementFinal,
+      nombre_jours: nombreJoursFinal
+    };
 
     console.log(`\n🔍 [DEBUG] New demande created:`);
     console.log(`   Demande ID  : ${demandeId}`);
@@ -2783,24 +3015,17 @@ app.post('/api/demandes', async (req, res) => {
     console.log(`   Responsable1: ${employe.mail_responsable1 || 'NOT SET'}`);
     console.log(`   Responsable2: ${employe.mail_responsable2 || 'NOT SET'}`);
 
-    if (employe.mail_responsable1) {
-      console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to responsable1: ${employe.mail_responsable1}`);
-
-      const emailResult = await envoyerEmailResponsable(employe, employe.mail_responsable1, demandeId, 1, {
-        type_demande, titre, date_depart,
-        date_retour: dateRetourFinal,
-        heure_depart: heureDepartFinal,
-        heure_retour: heureRetourFinal,
-        demi_journee,
-        type_conge: typeCongeFinal,
-        type_conge_autre: typeCongeAutreFinal,
-        frais_deplacement: fraisDeplacementFinal,
-        nombre_jours: nombreJoursFinal
-      }, null, tenant.key);
-
-      console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email to responsable1 result:`, JSON.stringify(emailResult));
-    } else {
-      console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No responsable1 defined for ${employe.nom} ${employe.prenom} — no email sent`);
+    const workflowState = buildWorkflowState(workflowResolution);
+    const firstStep = getRequestNextApprover(workflowState, {}, employe, type_demande, requestPayload);
+    if (firstStep?.step) {
+      const approverEmail = getApproverEmailFromEmployee(employe, firstStep.step.role);
+      if (approverEmail) {
+        console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to ${getApproverRoleLabel(firstStep.step.role)}: ${approverEmail}`);
+        const emailResult = await envoyerEmailResponsable(employe, approverEmail, demandeId, 1, requestPayload, null, tenant.key);
+        console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email result:`, JSON.stringify(emailResult));
+      } else {
+        console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No approver email resolved for ${getApproverRoleLabel(firstStep.step.role)}`);
+      }
     }
 
     res.json({ success: true, message: 'Demande créée avec succès', demandeId });
@@ -2936,7 +3161,7 @@ app.get('/approuver-demande', async (req, res) => {
     const employeesTable = tableName(req, 'employees');
     const leaveBalancesTable = tableName(req, 'leave_balances');
     const result = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.poste, e.adresse_mail, 
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.grade, e.site_dep, e.adresse_mail, 
               e.mail_responsable1, e.mail_responsable2,
               COALESCE(lb.balance, 0.000) AS solde_conge
        FROM ${demandesTable} d
@@ -2964,6 +3189,20 @@ app.get('/approuver-demande', async (req, res) => {
           <p>Cette demande a déjà été ${demande.statut === 'approuve' ? 'approuvée' : 'refusée'}.</p>
         </body></html>
       `);
+    }
+
+    const workflowResolution = resolveRequestWorkflow(tenant.key, demande, demande);
+    if (workflowResolution.mode === 'sage') {
+      return res.send(`
+        <html><body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #2563eb;">Workflow automatisé</h1>
+          <p>Ce site est géré dans SAGE et ne suit pas le workflow RH standard.</p>
+        </body></html>
+      `);
+    }
+
+    if (!workflowResolution.workflow || workflowResolution.legacy) {
+      // Tunisia keeps the existing behavior.
     }
 
     const typeDemandeLabel = demande.type_demande === 'conges' ? 'Congé' :
@@ -3128,7 +3367,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     const demandesTable = tableName(req, 'demande_rh');
     const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule, e.grade, e.site_dep
        FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
@@ -3139,126 +3378,97 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     demande.id = demande.employe_id;
 
     if (demande.statut !== 'en_attente') return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
-
-    const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
-    await poolHR.query(`UPDATE ${demandesTable} SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
-
-    const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
-    const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
-
-    if (niveau == 1 && demande.mail_responsable2) {
-      await sendEmailWithRetry({
-        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-        to: demande.adresse_mail,
-        subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
-            <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
-              <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-              <p>Votre demande a été approuvée par <strong>${resp1 ? resp1.fullName : 'votre responsable'}</strong>.</p>
-              <p>Elle est en attente d'approbation par <strong>${resp2 ? resp2.fullName : 'le deuxième responsable'}</strong>.</p>
-              <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-              <p><strong>Motif:</strong> ${demande.titre}</p>
-            </div>
-          </div>
-        `
-      }, 'Approbation niveau 1');
-
-      await envoyerEmailResponsable(demande, demande.mail_responsable2, id, 2, {
-        type_demande: demande.type_demande, titre: demande.titre,
-        date_depart: demande.date_depart, date_retour: demande.date_retour,
-        heure_depart: demande.heure_depart, heure_retour: demande.heure_retour,
-        demi_journee: demande.demi_journee, type_conge: demande.type_conge,
-        type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement,
-        nombre_jours: demande.nombre_jours
-      }, resp1 ? resp1.fullName : 'le premier responsable', tenant.key);
-
-      return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
+    const workflowResolution = resolveRequestWorkflow(tenant.key, demande, demande);
+    if (workflowResolution.mode === 'sage') {
+      return res.status(400).json({ error: 'Ce tenant est géré dans SAGE et ne suit pas le workflow RH standard.' });
     }
 
-    await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve' WHERE id = $1`, [id]);
+    if (workflowResolution.legacy) {
+      const colonne = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
+      await poolHR.query(`UPDATE ${demandesTable} SET ${colonne} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+      const resp1 = demande.mail_responsable1 ? extraireNomPrenomDepuisEmail(demande.mail_responsable1) : null;
+      const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
-    let approuveur = niveau == 1 && !demande.mail_responsable2 ? resp1 : niveau == 2 ? resp2 : null;
-    const typeCongeLabel = demande.type_demande === 'conges'
-      ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
-    const canCancelFromEmail = isDemandeCancellationAllowed({
-      ...demande,
-      statut: 'approuve'
-    });
-    const cancelUrl = canCancelFromEmail ? getDemandeCancelUrl(id, tenant.key) : null;
+      if (niveau == 1 && demande.mail_responsable2) {
+        await sendEmailWithRetry({
+          from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+          to: demande.adresse_mail,
+          subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #10b981;">✅ Étape 1 : Demande approuvée</h2>
+              <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
+                <p>Votre demande a été approuvée par <strong>${resp1 ? resp1.fullName : 'votre responsable'}</strong>.</p>
+                <p>Elle est en attente d'approbation par <strong>${resp2 ? resp2.fullName : 'le deuxième responsable'}</strong>.</p>
+              </div>
+            </div>
+          `
+        }, 'Approbation niveau 1');
+        await envoyerEmailResponsable(demande, demande.mail_responsable2, id, 2, {
+          type_demande: demande.type_demande, titre: demande.titre,
+          date_depart: demande.date_depart, date_retour: demande.date_retour,
+          heure_depart: demande.heure_depart, heure_retour: demande.heure_retour,
+          demi_journee: demande.demi_journee, type_conge: demande.type_conge,
+          type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement,
+          nombre_jours: demande.nombre_jours
+        }, resp1 ? resp1.fullName : 'le premier responsable', tenant.key);
+        return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
+      }
 
+      await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve' WHERE id = $1`, [id]);
+      return res.json({ success: true, message: 'Demande complètement approuvée et notifications envoyées' });
+    }
+
+    const steps = workflowResolution.workflow || [];
+    const currentStepIndex = (demande.approuve_responsable1 ? 1 : 0) + (demande.approuve_responsable2 ? 1 : 0);
+    const expectedRole = steps[currentStepIndex] ? steps[currentStepIndex].role : null;
+    const currentStep = steps[currentStepIndex];
+    if (!currentStep) return res.status(400).json({ error: 'Aucune étape restante pour cette demande.' });
+
+    const currentLevel = currentStepIndex + 1;
+    const nextStep = steps[currentStepIndex + 1];
+    const currentApproverEmail = getApproverEmailFromEmployee(demande, currentStep.role);
+    const providedStep = Number(niveau) || currentLevel;
+    if (providedStep !== currentLevel) {
+      return res.status(400).json({ error: `Étape invalide. Étape attendue: ${currentLevel}` });
+    }
+
+    const currentFlag = currentStepIndex === 0 ? 'approuve_responsable1' : 'approuve_responsable2';
+    await poolHR.query(`UPDATE ${demandesTable} SET ${currentFlag} = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+
+    if (nextStep && nextStep.role !== 'hr_notification') {
+      const nextEmail = getApproverEmailFromEmployee(demande, nextStep.role);
+      if (nextEmail) {
+        await envoyerEmailResponsable(demande, nextEmail, id, currentLevel + 1, {
+          type_demande: demande.type_demande, titre: demande.titre,
+          date_depart: demande.date_depart, date_retour: demande.date_retour,
+          heure_depart: demande.heure_depart, heure_retour: demande.heure_retour,
+          demi_journee: demande.demi_journee, type_conge: demande.type_conge,
+          type_conge_autre: demande.type_conge_autre, frais_deplacement: demande.frais_deplacement,
+          nombre_jours: demande.nombre_jours
+        }, currentStepIndex === 0 ? (currentApproverEmail || null) : null, tenant.key);
+      }
+      return res.json({ success: true, message: `Demande approuvée par ${getApproverRoleLabel(currentStep.role)}. En attente de ${getApproverRoleLabel(nextStep.role)}.` });
+    }
+
+    await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
     await sendEmailWithRetry({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-      to: demande.adresse_mail,
-      cc: niveau == 2 && demande.mail_responsable1 ? demande.mail_responsable1 : undefined,
-      subject: '✅ Votre demande RH a été approuvée',
+      to: tenant.rhAdminEmail,
+      subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #10b981; border-bottom: 3px solid #10b981; padding-bottom: 10px;">✅ Demande RH approuvée</h2>
-          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #10b981;">
-            <p><strong>Bonjour ${demande.nom} ${demande.prenom},</strong></p>
-            <p>Votre demande a été <strong style="color: #10b981;">approuvée</strong>.</p>
+          <h2 style="color: #10b981;">✅ Demande RH approuvée</h2>
+          <div style="background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <p><strong>Employé:</strong> ${demande.nom} ${demande.prenom}</p>
+            <p><strong>Site:</strong> ${escapeHtml(demande.site_dep || 'Non spécifié')}</p>
+            <p><strong>Type:</strong> ${escapeHtml(demande.type_demande)}</p>
           </div>
-          <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <p><strong>Type:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-            <p><strong>Motif:</strong> ${demande.titre}</p>
-            <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-            ${demande.date_retour ? `<p><strong>Date de retour:</strong> ${formatDateShort(demande.date_retour)}</p>` : ''}
-            ${typeCongeLabel ? `<p><strong>Type de congé:</strong> ${typeCongeLabel}</p>` : ''}
-            ${demande.nombre_jours ? `<p><strong>Nombre de jours demandés:</strong> ${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}</p>` : ''}
-            ${demande.heure_depart ? `<p><strong>Heure de départ:</strong> ${demande.heure_depart}</p>` : ''}
-            ${demande.heure_retour ? `<p><strong>Heure de retour:</strong> ${demande.heure_retour}</p>` : ''}
-            ${demande.frais_deplacement ? `<p><strong>Frais de déplacement:</strong> ${demande.frais_deplacement} TND</p>` : ''}
-            ${approuveur ? `<p><strong>Approuvé par:</strong> ${approuveur.fullName}</p>` : ''}
-          </div>
-          ${cancelUrl ? `
-            <div style="background: #fff7ed; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f97316;">
-              <p style="margin-top: 0; color: #9a3412;">
-                Si cette demande n'est plus valable, vous pouvez l'annuler tant que la période n'est pas passée.
-              </p>
-              <a href="${cancelUrl}" style="display: inline-block; background: #dc2626; color: #ffffff; padding: 12px 18px; border-radius: 8px; text-decoration: none; font-weight: bold;">
-                Annuler la demande
-              </a>
-            </div>
-          ` : ''}
         </div>
       `
-    }, 'Approbation finale - Email employé');
-
-    let joursOuvres = 0;
-    if (demande.type_demande === 'conges' && demande.date_retour) {
-      joursOuvres = calculerJoursOuvres(demande.date_depart, demande.date_retour);
-    }
-
-    try {
-      const pdfBuffer = await genererPDFDemandeApprouvee(demande, joursOuvres);
-      const pdfFileName = `Demande_RH_${demande.nom}_${demande.prenom}_${new Date().getTime()}.pdf`;
-
-      await sendEmailWithRetry({
-        from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
-        to: tenant.rhAdminEmail,
-        subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #1976d2; border-bottom: 3px solid #1976d2; padding-bottom: 10px;">📋 Nouvelle demande RH approuvée</h2>
-            <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-              <p><strong>Employé:</strong> ${demande.nom} ${demande.prenom}</p>
-              <p><strong>Type:</strong> ${demande.type_demande === 'conges' ? 'Congé' : demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission'}</p>
-              <p><strong>Date de départ:</strong> ${formatDateShort(demande.date_depart)}</p>
-              ${joursOuvres > 0 ? `<p><strong>Jours ouvrés (calculés):</strong> <strong>${joursOuvres} jour${joursOuvres > 1 ? 's' : ''}</strong></p>` : ''}
-              ${demande.nombre_jours ? `<p><strong>Jours demandés (employé):</strong> <strong>${demande.nombre_jours} jour${demande.nombre_jours > 1 ? 's' : ''}</strong></p>` : ''}
-            </div>
-            <p style="color: #6b7280; font-size: 14px;">📎 Consultez le PDF joint pour tous les détails.</p>
-          </div>
-        `,
-        attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
-      }, 'Notification RH - Demande approuvée (PDF)');
-    } catch (pdfError) {
-      console.error('❌ Erreur génération/envoi PDF:', pdfError);
-    }
-
-    res.json({ success: true, message: 'Demande complètement approuvée et notifications envoyées' });
+    }, 'Notification RH finale');
+    return res.json({ success: true, message: 'Demande approuvée et RH notifié.' });
   } catch (err) {
     console.error('❌ Erreur approbation demande:', err);
     res.status(500).json({ error: 'Erreur lors de l\'approbation' });
@@ -3418,7 +3628,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     const demandesTable = tableName(req, 'demande_rh');
     const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.grade, e.site_dep
        FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
@@ -3428,6 +3638,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     const demande = demandeResult.rows[0];
     if (demande.statut !== 'en_attente') return res.status(400).json({ error: 'Cette demande a déjà été traitée' });
 
+    const workflowResolution = resolveRequestWorkflow(getTenantConfig(req).key, demande, demande);
     const colonneRefus = niveau == 1 ? 'approuve_responsable1' : 'approuve_responsable2';
     await poolHR.query(
       `UPDATE ${demandesTable} SET statut = 'refuse', commentaire_refus = $1, ${colonneRefus} = false, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
