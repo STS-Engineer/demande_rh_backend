@@ -11,18 +11,28 @@ require('dotenv').config();
 
 const app = express();
 
-// ==================== CORS FIX ====================
+// ==================== CORS CONFIG ====================
+const allowedOrigins = (process.env.CORS_ORIGINS ||
+  'https://request-rh.azurewebsites.net,http://localhost:3000,http://localhost:3001,http://localhost:4173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:4173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: [
-    'https://request-rh.azurewebsites.net',
-    'http://localhost:3000'
-  ],
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant'],
   credentials: true
 }));
 app.options('*', cors());
-// ===================================================
+// ====================================================
 
 app.use(express.json());
 
@@ -107,7 +117,7 @@ async function verifySMTPConnection() {
 }
 
 function logEmailDetails(mailOptions, context, attempt = 1) {
-  console.log(`📧 [${new Date().toISOString()}] Détails email (tentative ${attempt}):`);
+  console.log(`📧 [${ts()}] Détails email (tentative ${attempt}):`);
   console.log(`   Contexte: ${context}`);
   console.log(`   Destinataire: ${mailOptions.to}`);
   console.log(`   Sujet: ${mailOptions.subject}`);
@@ -121,6 +131,24 @@ function logEmailDetails(mailOptions, context, attempt = 1) {
   );
 }
 
+function ts() {
+  return new Date().toISOString();
+}
+
+async function sendEmailWithRetryLogged(mailOptions, context, details = {}, maxRetries = 3) {
+  const recipient = mailOptions?.to || details.recipient || 'unknown';
+  const detailSuffix = Object.keys(details || {}).length > 0 ? ` | ${JSON.stringify(details)}` : '';
+  console.log(`📤 [${ts()}] About to send email | recipient: ${recipient} | context: ${context}${detailSuffix}`);
+  try {
+    const result = await sendEmailWithRetry(mailOptions, context, maxRetries);
+    console.log(`📬 [${ts()}] Email result | context: ${context} | recipient: ${recipient} | result: ${JSON.stringify(result)}`);
+    return result;
+  } catch (error) {
+    console.error(`❌ [${ts()}] Email result | context: ${context} | recipient: ${recipient} | error: ${error?.message || JSON.stringify(error)}`);
+    throw error;
+  }
+}
+
 async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   let lastError;
 
@@ -130,6 +158,7 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     const transporter = emailPool.getTransporter();
 
     try {
+      console.log(`🔁 [${ts()}] Attempt ${attempt}/${maxRetries} starting... | context: ${context} | recipient: ${mailOptions?.to || 'unknown'}`);
       if (mailOptions.attachments && mailOptions.attachments.length > 0) {
         const totalSize = mailOptions.attachments.reduce((sum, att) => {
           return sum + (att.content?.length || 0);
@@ -140,13 +169,12 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
       }
 
       const info = await transporter.sendMail(mailOptions);
-      console.log(`✅ Email envoyé avec succès (tentative ${attempt}/${maxRetries})`);
-      console.log(`   Message ID: ${info.messageId}`);
+      console.log(`✅ [${ts()}] Attempt ${attempt} succeeded, messageId: ${info.messageId}`);
       return { success: true, messageId: info.messageId, attempt };
 
     } catch (error) {
       lastError = error;
-      console.error(`❌ Échec envoi email ${context} (tentative ${attempt}/${maxRetries}):`, error.message);
+      console.error(`❌ [${ts()}] Attempt ${attempt} failed: ${error.message} (code: ${error.code || 'N/A'}) | context: ${context}`);
 
       if (attempt < maxRetries) {
         const baseDelay = 1000;
@@ -154,7 +182,7 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         const jitter = Math.random() * 1000;
         const totalDelay = delay + jitter;
-        console.log(`⏳ Nouvelle tentative dans ${Math.round(totalDelay)}ms...`);
+        console.log(`⏳ [${ts()}] Retrying in ${Math.round(totalDelay)}ms... | next attempt: ${attempt + 1}/${maxRetries}`);
         emailPool.rotateTransporter();
         await new Promise(resolve => setTimeout(resolve, totalDelay));
         logEmailDetails(mailOptions, context, attempt + 1);
@@ -163,13 +191,14 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
   }
 
   try {
-    console.log('🔄 Tentative avec nouveau transporteur...');
+    console.log(`🔄 [${ts()}] trying emergency transporter | context: ${context} | recipient: ${mailOptions?.to || 'unknown'}`);
     const emergencyTransporter = createTransporter();
     const info = await emergencyTransporter.sendMail(mailOptions);
-    console.log('✅ Email envoyé avec transporteur d\'urgence');
+    console.log(`✅ [${ts()}] emergency transporter succeeded, messageId: ${info.messageId}`);
     return { success: true, messageId: info.messageId, attempt: 'emergency', warning: 'Sent with emergency transporter' };
   } catch (emergencyError) {
-    console.error('💥 Échec même avec transporteur d\'urgence:', emergencyError.message);
+    console.error(`❌ [${ts()}] emergency transporter failed: ${emergencyError.message} (code: ${emergencyError.code || 'N/A'}) | context: ${context}`);
+    console.error(`💥 [${ts()}] Final email failure summary | context: ${context} | recipient: ${mailOptions?.to || 'unknown'} | lastError: ${lastError?.message || 'none'} | emergencyError: ${emergencyError.message}`);
     throw {
       message: `Échec d'envoi après ${maxRetries} tentatives et transporteur d'urgence`,
       originalError: lastError,
@@ -287,6 +316,14 @@ function getTenantConfig(req) {
 
 function tableName(req, baseTableName) {
   return `${getTenantConfig(req).schema}.${baseTableName}`;
+}
+
+function employeeSelectColumns(tenantKey) {
+  const baseColumns = ['nom', 'prenom', 'poste', 'site_dep', 'adresse_mail', 'mail_responsable1', 'mail_responsable2'];
+  if (normalizeTenantKey(tenantKey) !== TENANT_CONFIG.tunisia.key) {
+    baseColumns.splice(3, 0, 'grade');
+  }
+  return baseColumns.join(', ');
 }
 
 function normalizeText(value) {
@@ -946,7 +983,7 @@ function getDemandeCancellationRecipients(demande, tenantKey = TENANT_CONFIG.tun
 async function sendDemandeCancellationNotification(demande, tenantKey = TENANT_CONFIG.tunisia.key) {
   const employeeName = `${demande.nom || ''} ${demande.prenom || ''}`.trim();
 
-  await sendEmailWithRetry({
+  await sendEmailWithRetryLogged({
     from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
     to: getDemandeCancellationRecipients(demande, tenantKey),
     subject: `Demande RH annulée - ${employeeName}`,
@@ -969,7 +1006,7 @@ async function sendDemandeCancellationNotification(demande, tenantKey = TENANT_C
         <p style="color: #6b7280; font-size: 14px;">Le statut de la demande est maintenant : Demande annulée.</p>
       </div>
     `
-  }, 'Notification annulation demande RH');
+  }, 'Notification annulation demande RH', { recipient: getDemandeCancellationRecipients(demande, tenantKey), demandeId: demande.id || 'unknown' });
 }
 
 async function getDemandeCancellationContext(id, req) {
@@ -1664,7 +1701,7 @@ async function sendAttendanceReport() {
       `
     };
 
-    await sendEmailWithRetry(mailOptions, "Attendance report");
+    await sendEmailWithRetryLogged(mailOptions, "Attendance report", { recipient: mailOptions.to, report: 'attendance' });
     console.log("✅ Attendance report sent successfully");
 
   } catch (error) {
@@ -1771,7 +1808,7 @@ app.post('/api/generer-attestation', async (req, res) => {
       attachments: optimizedAttachments
     };
 
-    const emailResult = await sendEmailWithRetry(mailOptions, `Génération ${documentTypeLabel}`);
+    const emailResult = await sendEmailWithRetryLogged(mailOptions, `Génération ${documentTypeLabel}`, { recipient: mailOptions.to, documentType: documentTypeLabel });
     res.json({ success: true, message: `${documentTypeLabel} générée et envoyée avec succès`, fileName, emailResult });
 
   } catch (err) {
@@ -1873,7 +1910,7 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
     const pdfFileName = `Demande_Avance_Salaire_${employe.nom}_${employe.prenom}_${Date.now()}.pdf`;
 
     // Email to manager (Fethi only) with decision link
-    await sendEmailWithRetry({
+    await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: tenant.salaryAdvanceManagerEmail,
       subject: `Demande d'avance sur salaire — ${employe.nom} ${employe.prenom}`,
@@ -1905,11 +1942,11 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
         </div>
       `,
       attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
-    }, 'Demande avance sur salaire — managers');
+    }, 'Demande avance sur salaire — managers', { recipient: tenant.salaryAdvanceManagerEmail, demandeId });
 
     // Confirmation to employee
     if (employe.adresse_mail) {
-      await sendEmailWithRetry({
+      await sendEmailWithRetryLogged({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
         to: employe.adresse_mail,
         subject: 'Votre demande d\'avance sur salaire a été transmise',
@@ -1921,7 +1958,7 @@ app.post('/api/demandes-avance-salaire', async (req, res) => {
                a été transmise à l'administration. Vous recevrez un email dès qu'une décision sera prise.</p>
           </div>
         `
-      }, 'Confirmation employé — avance soumise');
+      }, 'Confirmation employé — avance soumise', { recipient: employe.adresse_mail, demandeId });
     }
 
     res.json({
@@ -2283,7 +2320,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
       );
 
       if (demande.adresse_mail) {
-        await sendEmailWithRetry({
+        await sendEmailWithRetryLogged({
           from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
           to: demande.adresse_mail,
           subject: 'Votre demande d\'avance sur salaire — Refusée',
@@ -2303,7 +2340,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
               </p>
             </div>
           `
-        }, 'Refus avance — email employé');
+      }, 'Refus avance — email employé', { recipient: demande.adresse_mail, demandeId: id });
       }
 
       return res.json({ success: true, message: 'Demande refusée. L\'employé a été notifié.' });
@@ -2340,7 +2377,7 @@ app.post('/api/demandes-avance-salaire/:id/decision-manager', async (req, res) =
 
     // Email to employee with manager's decision — they must accept or reject
     if (demande.adresse_mail) {
-      await sendEmailWithRetry({
+      await sendEmailWithRetryLogged({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
         to: demande.adresse_mail,
         subject: termsChanged
@@ -2821,7 +2858,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
       );
 
       // Notify Fethi that employee rejected his terms
-      await sendEmailWithRetry({
+      await sendEmailWithRetryLogged({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
         to: tenant.salaryAdvanceManagerEmail,
         subject: `🚫 Avance refusée par l'employé — ${demande.nom} ${demande.prenom}`,
@@ -2871,7 +2908,7 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
 
     // Send final PDF to employee
     if (demande.adresse_mail) {
-      await sendEmailWithRetry({
+      await sendEmailWithRetryLogged({
         from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
         to: demande.adresse_mail,
         subject: '✅ Avance sur salaire confirmée — Document final',
@@ -2895,11 +2932,11 @@ app.post('/api/demandes-avance-salaire/:id/confirmation-employe', async (req, re
           </div>
         `,
         attachments: [{ filename: pdfFileName, content: pdfBuffer, contentType: 'application/pdf' }]
-      }, 'Confirmation employé — avance finale');
+      }, 'Confirmation employé — avance finale', { recipient: demande.adresse_mail, demandeId: id });
     }
 
     // Send final PDF to Nesria (HR) only — after employee confirms
-    await sendEmailWithRetry({
+    await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: tenant.salaryAdvanceHrEmail,
       cc: tenant.salaryAdvanceManagerEmail,
@@ -2948,7 +2985,7 @@ app.post('/api/demandes', async (req, res) => {
     }
 
     const employeResult = await poolHR.query(
-      `SELECT nom, prenom, poste, grade, site_dep, adresse_mail, mail_responsable1, mail_responsable2
+      `SELECT ${employeeSelectColumns(tenant.key)}
        FROM ${employeesTable} WHERE id = $1`,
       [employe_id]
     );
@@ -3015,18 +3052,47 @@ app.post('/api/demandes', async (req, res) => {
     console.log(`   Responsable1: ${employe.mail_responsable1 || 'NOT SET'}`);
     console.log(`   Responsable2: ${employe.mail_responsable2 || 'NOT SET'}`);
 
-    const workflowState = buildWorkflowState(workflowResolution);
-    const firstStep = getRequestNextApprover(workflowState, {}, employe, type_demande, requestPayload);
-    if (firstStep?.step) {
-      const approverEmail = getApproverEmailFromEmployee(employe, firstStep.step.role);
-      if (approverEmail) {
-        console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to ${getApproverRoleLabel(firstStep.step.role)}: ${approverEmail}`);
-        const emailResult = await envoyerEmailResponsable(employe, approverEmail, demandeId, 1, requestPayload, null, tenant.key);
+    if (workflowResolution.legacy) {
+    // Tunisia / fallback behavior: always notify mail_responsable1 first
+    if (employe.mail_responsable1) {
+        console.log(`📤 [DEBUG][DEMANDE ${demandeId}] (legacy) Sending email to responsable1: ${employe.mail_responsable1}`);
+        const emailResult = await envoyerEmailResponsable(employe, employe.mail_responsable1, demandeId, 1, requestPayload, null, tenant.key);
         console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email result:`, JSON.stringify(emailResult));
       } else {
-        console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No approver email resolved for ${getApproverRoleLabel(firstStep.step.role)}`);
+        console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No mail_responsable1 set — no email sent`);
+      }
+    } else {
+    if (workflowResolution.legacy) {
+      if (employe.mail_responsable1) {
+        console.log(`📤 [DEBUG][DEMANDE ${demandeId}] (legacy) Sending email to responsable1: ${employe.mail_responsable1}`);
+        const emailResult = await envoyerEmailResponsable(
+          employe,
+          employe.mail_responsable1,
+          demandeId,
+          1,
+          requestPayload,
+          null,
+          tenant.key
+        );
+        console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email result:`, JSON.stringify(emailResult));
+      } else {
+        console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No mail_responsable1 set — no email sent`);
+      }
+    } else {
+      const workflowState = buildWorkflowState(workflowResolution);
+      const firstStep = getRequestNextApprover(workflowState, {}, employe, type_demande, requestPayload);
+      if (firstStep?.step) {
+        const approverEmail = getApproverEmailFromEmployee(employe, firstStep.step.role);
+        if (approverEmail) {
+          console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Sending email to ${getApproverRoleLabel(firstStep.step.role)}: ${approverEmail}`);
+          const emailResult = await envoyerEmailResponsable(employe, approverEmail, demandeId, 1, requestPayload, null, tenant.key);
+          console.log(`📬 [DEBUG][DEMANDE ${demandeId}] Email result:`, JSON.stringify(emailResult));
+        } else {
+          console.warn(`⚠️ [DEBUG][DEMANDE ${demandeId}] No approver email resolved for ${getApproverRoleLabel(firstStep.step.role)}`);
+        }
       }
     }
+  }
 
     res.json({ success: true, message: 'Demande créée avec succès', demandeId });
   } catch (err) {
@@ -3058,7 +3124,9 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
 
     if (employeeId) {
       const leaveBalancesTable = `${(TENANT_CONFIG[normalizeTenantKey(tenantKey)] || TENANT_CONFIG.tunisia).schema}.leave_balances`;
+      console.log(`[${new Date().toISOString()}] 🔎 About to query leave_balances for employeeId=${employeeId}, table=${leaveBalancesTable}`);
       const lb = await poolHR.query(`SELECT balance FROM ${leaveBalancesTable} WHERE employee_id = $1`, [employeeId]);
+      console.log(`[${new Date().toISOString()}] 🔎 leave_balances query returned, rows=${lb.rows.length}`);
 
       console.log(`   [DEBUG] Leave balance query returned ${lb.rows.length} row(s): ${lb.rows.length > 0 ? lb.rows[0].balance : 'none'}`);
 
@@ -3141,7 +3209,7 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
 
   try {
     console.log(`📤 [DEBUG][DEMANDE ${demandeId}] Attempting sendEmailWithRetry to: ${emailResponsable}`);
-    await sendEmailWithRetry(mailOptions, `Notification demande RH niveau ${niveau}`);
+    await sendEmailWithRetryLogged(mailOptions, `Notification demande RH niveau ${niveau}`, { recipient: emailResponsable, demandeId, niveau });
     console.log(`✅ [DEBUG][DEMANDE ${demandeId}] Email successfully sent to: ${emailResponsable} (niveau ${niveau})`);
     return { success: true };
   } catch (error) {
@@ -3161,8 +3229,7 @@ app.get('/approuver-demande', async (req, res) => {
     const employeesTable = tableName(req, 'employees');
     const leaveBalancesTable = tableName(req, 'leave_balances');
     const result = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.poste, e.grade, e.site_dep, e.adresse_mail, 
-              e.mail_responsable1, e.mail_responsable2,
+      `SELECT d.*, e.${employeeSelectColumns(tenant.key).replace(/, /g, ', e.')},
               COALESCE(lb.balance, 0.000) AS solde_conge
        FROM ${demandesTable} d
        JOIN ${employeesTable} e ON d.employe_id = e.id
@@ -3367,7 +3434,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     const demandesTable = tableName(req, 'demande_rh');
     const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule, e.grade, e.site_dep
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.poste, e.matricule, ${normalizeTenantKey(tenant.key) !== TENANT_CONFIG.tunisia.key ? 'e.grade,' : ''} e.site_dep
        FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
@@ -3390,7 +3457,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       const resp2 = demande.mail_responsable2 ? extraireNomPrenomDepuisEmail(demande.mail_responsable2) : null;
 
       if (niveau == 1 && demande.mail_responsable2) {
-        await sendEmailWithRetry({
+        await sendEmailWithRetryLogged({
           from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
           to: demande.adresse_mail,
           subject: 'Votre demande RH a été approuvée par votre responsable (Niveau 1)',
@@ -3404,7 +3471,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
               </div>
             </div>
           `
-        }, 'Approbation niveau 1');
+      }, 'Approbation niveau 1', { recipient: demande.adresse_mail, demandeId: id, niveau: 1 });
         await envoyerEmailResponsable(demande, demande.mail_responsable2, id, 2, {
           type_demande: demande.type_demande, titre: demande.titre,
           date_depart: demande.date_depart, date_retour: demande.date_retour,
@@ -3453,7 +3520,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
     }
 
     await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
-    await sendEmailWithRetry({
+    await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: tenant.rhAdminEmail,
       subject: `📋 Demande RH approuvée - ${demande.nom} ${demande.prenom}`,
@@ -3467,7 +3534,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
           </div>
         </div>
       `
-    }, 'Notification RH finale');
+    }, 'Notification RH finale', { recipient: tenant.salaryAdvanceHrEmail, demandeId: id });
     return res.json({ success: true, message: 'Demande approuvée et RH notifié.' });
   } catch (err) {
     console.error('❌ Erreur approbation demande:', err);
@@ -3628,7 +3695,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     const demandesTable = tableName(req, 'demande_rh');
     const employeesTable = tableName(req, 'employees');
     const demandeResult = await poolHR.query(
-      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, e.grade, e.site_dep
+      `SELECT d.*, e.nom, e.prenom, e.adresse_mail, e.mail_responsable1, e.mail_responsable2, ${normalizeTenantKey(getTenantConfig(req).key) !== TENANT_CONFIG.tunisia.key ? 'e.grade,' : ''} e.site_dep
        FROM ${demandesTable} d JOIN ${employeesTable} e ON d.employe_id = e.id WHERE d.id = $1`,
       [id]
     );
@@ -3655,7 +3722,7 @@ app.post('/api/demandes/:id/refuser', async (req, res) => {
     const typeCongeLabel = demande.type_demande === 'conges'
       ? getTypeCongeLabel(demande.type_conge, demande.type_conge_autre) : null;
 
-    await sendEmailWithRetry({
+    await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: demande.adresse_mail,
       cc: niveau == 2 && demande.mail_responsable1 ? demande.mail_responsable1 : undefined,
@@ -3844,7 +3911,7 @@ async function sendTeamAttendanceReportPerResponsable() {
       `
     };
 
-    await sendEmailWithRetry(mailOptions, `Team attendance report → ${REPORT_RECIPIENT}`);
+    await sendEmailWithRetryLogged(mailOptions, `Team attendance report → ${REPORT_RECIPIENT}`, { recipient: REPORT_RECIPIENT, report: 'team attendance' });
     console.log(`✅ Team report sent to ${REPORT_RECIPIENT} (${teamRecords.length} employees present)`);
 
   } catch (error) {
@@ -3868,7 +3935,7 @@ app.get('/health', (req, res) => {
 
 app.get('/api/test-email', async (req, res) => {
   try {
-    const result = await sendEmailWithRetry({
+    const result = await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: 'rami.mejri@avocarbon.com',
       subject: 'Test SMTP Configuration - ' + new Date().toISOString(),
