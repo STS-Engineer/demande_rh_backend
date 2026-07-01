@@ -5,6 +5,8 @@ const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
+const { spawn } = require('child_process');
 const createReport = require('docx-templates').default;
 const PDFDocument = require('pdfkit');
 require('dotenv').config();
@@ -59,26 +61,303 @@ const poolAttendance = new Pool({
 });
 
 // ==================== CONFIGURATION SMTP ====================
+function normalizeOptionalTextInput(value) {
+  const normalized = String(value || '').trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseBooleanEnv(value, defaultValue = false) {
+  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
+  return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function getMailProvider() {
+  return (process.env.MAIL_PROVIDER || 'direct').toLowerCase();
+}
+
+function getSmtpConfigSummary() {
+  const host = normalizeOptionalTextInput(process.env.SMTP_HOST) || 'avocarbon-com.mail.protection.outlook.com';
+  const parsedPort = Number.parseInt(String(process.env.SMTP_PORT || '25'), 10);
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 25;
+  const defaultAuthMode = 'basic';
+  const authMode = String(process.env.SMTP_AUTH_MODE || defaultAuthMode).trim().toLowerCase();
+  return {
+    provider: getMailProvider(),
+    host,
+    port,
+    secure: parseBooleanEnv(process.env.SMTP_SECURE, port === 465),
+    authMode,
+    requireTLS: parseBooleanEnv(process.env.SMTP_REQUIRE_TLS, false),
+    from: MAIL_FROM_ADDRESS
+  };
+}
 
 const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'avocarbon-com.mail.protection.outlook.com',
-    port: parseInt(process.env.SMTP_PORT) || 25,
-    secure: process.env.SMTP_SECURE === 'true' || false,
-    auth: {
-      user: process.env.SMTP_USER || 'administration.STS@avocarbon.com',
-      pass: process.env.SMTP_PASS || 'shnlgdyfbcztbhxn'
-    },
-    tls: {
-      ciphers: 'SSLv3',
-      rejectUnauthorized: false
-    },
-    connectionTimeout: 15000,
+  const host = normalizeOptionalTextInput(process.env.SMTP_HOST) || 'avocarbon-com.mail.protection.outlook.com';
+  const parsedPort = Number.parseInt(String(process.env.SMTP_PORT || '25'), 10);
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 25;
+  const secure = parseBooleanEnv(process.env.SMTP_SECURE, port === 465);
+  const defaultAuthMode = host.toLowerCase().includes('mail.protection.outlook.com') ? 'none' : 'basic';
+  const authMode = String(process.env.SMTP_AUTH_MODE || defaultAuthMode).trim().toLowerCase();
+  const smtpUser = normalizeOptionalTextInput(process.env.SMTP_USER) || 'administration.STS@avocarbon.com';
+  const smtpPass = normalizeOptionalTextInput(process.env.SMTP_PASS) || 'shnlgdyfbcztbhxn';
+
+  const transporterOptions = {
+    host,
+    port,
+    secure,
+    pool: true,
+    maxConnections: 2,
+    maxMessages: 100,
+    connectionTimeout: 20000,
     greetingTimeout: 15000,
-    socketTimeout: 15000
-  });
+    socketTimeout: 60000,
+    tls: {
+      servername: host
+    }
+  };
+
+  if (parseBooleanEnv(process.env.SMTP_REQUIRE_TLS, false)) {
+    transporterOptions.requireTLS = true;
+  }
+
+  if (authMode !== 'none' && smtpUser && smtpPass) {
+    transporterOptions.auth = {
+      user: smtpUser,
+      pass: smtpPass
+    };
+  }
+
+  return nodemailer.createTransport(transporterOptions);
 };
 
+const createTransporterOAuthAlt = () => {
+  return createTransporter();
+};
+
+const GRAPH_MAIL_TENANT_ID = process.env.GRAPH_MAIL_TENANT_ID || process.env.AZURE_TENANT_ID;
+const GRAPH_MAIL_CLIENT_ID = process.env.GRAPH_MAIL_CLIENT_ID || process.env.AZURE_CLIENT_ID;
+const GRAPH_MAIL_CLIENT_SECRET = process.env.GRAPH_MAIL_CLIENT_SECRET || process.env.AZURE_CLIENT_SECRET;
+const GRAPH_MAIL_FROM = process.env.GRAPH_MAIL_FROM || process.env.SMTP_USER || 'administration.STS@avocarbon.com';
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'Administration STS';
+const MAIL_FROM_ADDRESS = process.env.MAIL_FROM_ADDRESS || process.env.SMTP_FROM || process.env.SMTP_USER || 'administration.STS@avocarbon.com';
+let graphTokenCache = null;
+
+function isGraphMailEnabled() {
+  return getMailProvider() === 'graph' ||
+    Boolean(GRAPH_MAIL_TENANT_ID && GRAPH_MAIL_CLIENT_ID && GRAPH_MAIL_CLIENT_SECRET);
+}
+
+function isOutlookDesktopMailEnabled() {
+  return ['outlook', 'outlook_desktop', 'desktop_outlook'].includes(getMailProvider());
+}
+
+function normalizeEmailAddresses(recipients) {
+  if (!recipients) return [];
+  const values = Array.isArray(recipients) ? recipients : String(recipients).split(',');
+  return values
+    .map((recipient) => {
+      if (typeof recipient === 'string') return recipient.trim();
+      return recipient?.address || recipient?.email || '';
+    })
+    .filter(Boolean)
+}
+
+function normalizeEmailRecipients(recipients) {
+  return normalizeEmailAddresses(recipients)
+    .map((address) => ({ emailAddress: { address } }));
+}
+
+async function getGraphAccessToken() {
+  if (graphTokenCache && graphTokenCache.expiresAt > Date.now() + 60000) {
+    return graphTokenCache.accessToken;
+  }
+
+  if (!GRAPH_MAIL_TENANT_ID || !GRAPH_MAIL_CLIENT_ID || !GRAPH_MAIL_CLIENT_SECRET) {
+    throw new Error('Microsoft Graph mail is missing GRAPH_MAIL_TENANT_ID, GRAPH_MAIL_CLIENT_ID, or GRAPH_MAIL_CLIENT_SECRET');
+  }
+
+  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(GRAPH_MAIL_TENANT_ID)}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    client_id: GRAPH_MAIL_CLIENT_ID,
+    client_secret: GRAPH_MAIL_CLIENT_SECRET,
+    scope: 'https://graph.microsoft.com/.default',
+    grant_type: 'client_credentials'
+  });
+
+  const response = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body
+  });
+
+  const tokenResult = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Microsoft Graph token error ${response.status}: ${tokenResult.error_description || tokenResult.error || response.statusText}`);
+  }
+
+  graphTokenCache = {
+    accessToken: tokenResult.access_token,
+    expiresAt: Date.now() + Math.max(Number(tokenResult.expires_in || 3600) - 120, 60) * 1000
+  };
+  return graphTokenCache.accessToken;
+}
+
+async function sendEmailWithGraph(mailOptions, context) {
+  if (typeof fetch !== 'function') {
+    throw new Error('Microsoft Graph mail requires Node.js 18+ fetch support');
+  }
+
+  const accessToken = await getGraphAccessToken();
+  const fromAddress = mailOptions.from?.address || GRAPH_MAIL_FROM;
+  const toRecipients = normalizeEmailRecipients(mailOptions.to);
+  const ccRecipients = normalizeEmailRecipients(mailOptions.cc);
+  const bccRecipients = normalizeEmailRecipients(mailOptions.bcc);
+
+  if (toRecipients.length === 0) {
+    throw new Error(`No recipient resolved for ${context}`);
+  }
+
+  const attachments = (mailOptions.attachments || []).map((attachment) => ({
+    '@odata.type': '#microsoft.graph.fileAttachment',
+    name: attachment.filename || attachment.name || 'attachment',
+    contentType: attachment.contentType || 'application/octet-stream',
+    contentBytes: Buffer.isBuffer(attachment.content)
+      ? attachment.content.toString('base64')
+      : Buffer.from(String(attachment.content || ''), 'utf8').toString('base64')
+  }));
+
+  const response = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(fromAddress)}/sendMail`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      message: {
+        subject: mailOptions.subject,
+        body: {
+          contentType: mailOptions.html ? 'HTML' : 'Text',
+          content: mailOptions.html || mailOptions.text || ''
+        },
+        toRecipients,
+        ccRecipients,
+        bccRecipients,
+        attachments
+      },
+      saveToSentItems: true
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Microsoft Graph sendMail error ${response.status}: ${errorText || response.statusText}`);
+  }
+
+  return {
+    success: true,
+    messageId: null,
+    accepted: toRecipients.map((recipient) => recipient.emailAddress.address),
+    rejected: [],
+    response: `Microsoft Graph sendMail accepted (${response.status})`,
+    attempt: 'graph'
+  };
+}
+
+async function writeOutlookAttachmentFiles(mailOptions, workDir) {
+  const attachments = [];
+  for (const attachment of mailOptions.attachments || []) {
+    const fileName = String(attachment.filename || attachment.name || 'attachment').replace(/[<>:"/\\|?*]/g, '_');
+    const filePath = path.join(workDir, `${crypto.randomBytes(6).toString('hex')}_${fileName}`);
+    const content = Buffer.isBuffer(attachment.content)
+      ? attachment.content
+      : Buffer.from(String(attachment.content || ''), 'utf8');
+    await fs.writeFile(filePath, content);
+    attachments.push({ path: filePath });
+  }
+  return attachments;
+}
+
+function runPowerShellEncoded(script) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`Outlook PowerShell send failed with code ${code}: ${stderr || stdout}`));
+      }
+    });
+  });
+}
+
+async function sendEmailWithOutlookDesktop(mailOptions, context) {
+  const to = normalizeEmailAddresses(mailOptions.to);
+  const cc = normalizeEmailAddresses(mailOptions.cc);
+  const bcc = normalizeEmailAddresses(mailOptions.bcc);
+  if (to.length === 0) {
+    throw new Error(`No recipient resolved for ${context}`);
+  }
+
+  const workDir = path.join(os.tmpdir(), `demande-rh-outlook-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`);
+  await fs.mkdir(workDir, { recursive: true });
+  const attachmentFiles = await writeOutlookAttachmentFiles(mailOptions, workDir);
+  const payloadPath = path.join(workDir, 'mail.json');
+  const payload = {
+    to,
+    cc,
+    bcc,
+    subject: mailOptions.subject || '',
+    html: mailOptions.html || '',
+    text: mailOptions.text || '',
+    attachments: attachmentFiles
+  };
+  await fs.writeFile(payloadPath, JSON.stringify(payload), 'utf8');
+
+  const escapedPayloadPath = payloadPath.replace(/'/g, "''");
+  const script = `
+$ErrorActionPreference = 'Stop'
+$payload = Get-Content -LiteralPath '${escapedPayloadPath}' -Raw | ConvertFrom-Json
+$outlook = New-Object -ComObject Outlook.Application
+$mail = $outlook.CreateItem(0)
+$mail.To = [string]::Join(';', @($payload.to))
+if ($payload.cc) { $mail.CC = [string]::Join(';', @($payload.cc)) }
+if ($payload.bcc) { $mail.BCC = [string]::Join(';', @($payload.bcc)) }
+$mail.Subject = [string]$payload.subject
+if ($payload.html) {
+  $mail.HTMLBody = [string]$payload.html
+} else {
+  $mail.Body = [string]$payload.text
+}
+foreach ($attachment in @($payload.attachments)) {
+  if ($attachment.path) { [void]$mail.Attachments.Add([string]$attachment.path) }
+}
+$mail.Send()
+Write-Output 'sent'
+`;
+
+  try {
+    await runPowerShellEncoded(script);
+    return {
+      success: true,
+      messageId: null,
+      accepted: to,
+      rejected: [],
+      response: 'Sent with local Outlook desktop profile',
+      attempt: 'outlook_desktop'
+    };
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 const emailPool = {
   transporters: [],
   currentIndex: 0,
@@ -106,6 +385,15 @@ const emailPool = {
 emailPool.init(3);
 
 async function verifySMTPConnection() {
+  if (isGraphMailEnabled()) {
+    console.log('ℹ️ SMTP verification skipped because MAIL_PROVIDER=graph');
+    return;
+  }
+  if (isOutlookDesktopMailEnabled()) {
+    console.log('ℹ️ SMTP verification skipped because MAIL_PROVIDER=outlook');
+    return;
+  }
+
   for (let i = 0; i < emailPool.transporters.length; i++) {
     try {
       await emailPool.transporters[i].verify();
@@ -136,6 +424,11 @@ function ts() {
 }
 
 async function sendEmailWithRetryLogged(mailOptions, context, details = {}, maxRetries = 3) {
+  mailOptions.from = {
+    name: MAIL_FROM_NAME,
+    address: MAIL_FROM_ADDRESS
+  };
+
   const recipient = mailOptions?.to || details.recipient || 'unknown';
   const detailSuffix = Object.keys(details || {}).length > 0 ? ` | ${JSON.stringify(details)}` : '';
   console.log(`📤 [${ts()}] About to send email | recipient: ${recipient} | context: ${context}${detailSuffix}`);
@@ -154,6 +447,20 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 
   logEmailDetails(mailOptions, context, 1);
 
+  if (isGraphMailEnabled()) {
+    console.log(`📤 [${ts()}] Using Microsoft Graph mail provider | context: ${context} | recipient: ${mailOptions?.to || 'unknown'}`);
+    const graphResult = await sendEmailWithGraph(mailOptions, context);
+    console.log(`✅ [${ts()}] Microsoft Graph sendMail succeeded | context: ${context} | accepted: ${JSON.stringify(graphResult.accepted)}`);
+    return graphResult;
+  }
+
+  if (isOutlookDesktopMailEnabled()) {
+    console.log(`📤 [${ts()}] Using local Outlook desktop provider | context: ${context} | recipient: ${mailOptions?.to || 'unknown'}`);
+    const outlookResult = await sendEmailWithOutlookDesktop(mailOptions, context);
+    console.log(`✅ [${ts()}] Local Outlook desktop send succeeded | context: ${context} | accepted: ${JSON.stringify(outlookResult.accepted)}`);
+    return outlookResult;
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const transporter = emailPool.getTransporter();
 
@@ -170,7 +477,15 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
 
       const info = await transporter.sendMail(mailOptions);
       console.log(`✅ [${ts()}] Attempt ${attempt} succeeded, messageId: ${info.messageId}`);
-      return { success: true, messageId: info.messageId, attempt };
+      console.log(`📨 [${ts()}] SMTP delivery details | accepted: ${JSON.stringify(info.accepted || [])} | rejected: ${JSON.stringify(info.rejected || [])} | response: ${info.response || 'N/A'}`);
+      return {
+        success: true,
+        messageId: info.messageId,
+        accepted: info.accepted || [],
+        rejected: info.rejected || [],
+        response: info.response,
+        attempt
+      };
 
     } catch (error) {
       lastError = error;
@@ -195,7 +510,16 @@ async function sendEmailWithRetry(mailOptions, context, maxRetries = 3) {
     const emergencyTransporter = createTransporter();
     const info = await emergencyTransporter.sendMail(mailOptions);
     console.log(`✅ [${ts()}] emergency transporter succeeded, messageId: ${info.messageId}`);
-    return { success: true, messageId: info.messageId, attempt: 'emergency', warning: 'Sent with emergency transporter' };
+    console.log(`📨 [${ts()}] SMTP delivery details | accepted: ${JSON.stringify(info.accepted || [])} | rejected: ${JSON.stringify(info.rejected || [])} | response: ${info.response || 'N/A'}`);
+    return {
+      success: true,
+      messageId: info.messageId,
+      accepted: info.accepted || [],
+      rejected: info.rejected || [],
+      response: info.response,
+      attempt: 'emergency',
+      warning: 'Sent with emergency transporter'
+    };
   } catch (emergencyError) {
     console.error(`❌ [${ts()}] emergency transporter failed: ${emergencyError.message} (code: ${emergencyError.code || 'N/A'}) | context: ${context}`);
     console.error(`💥 [${ts()}] Final email failure summary | context: ${context} | recipient: ${mailOptions?.to || 'unknown'} | lastError: ${lastError?.message || 'none'} | emergencyError: ${emergencyError.message}`);
@@ -3220,6 +3544,187 @@ async function envoyerEmailResponsable(employe, emailResponsable, demandeId, niv
   }
 }
 
+app.get('/api/approvals/pending', async (req, res) => {
+  const email = String(req.query.email || '').trim().toLowerCase();
+
+  if (!email) {
+    return res.status(400).json({ error: 'email query parameter is required' });
+  }
+
+  try {
+    const tenant = getTenantConfig(req);
+    const demandesTable = tableName(req, 'demande_rh');
+    const employeesTable = tableName(req, 'employees');
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail,
+              e.mail_responsable1, e.mail_responsable2
+       FROM ${demandesTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
+       WHERE d.statut = 'en_attente'
+         AND (
+           (LOWER(e.mail_responsable1) = $1 AND COALESCE(d.approuve_responsable1, false) = false)
+           OR
+           (LOWER(e.mail_responsable2) = $1 AND COALESCE(d.approuve_responsable1, false) = true
+             AND COALESCE(d.approuve_responsable2, false) = false)
+         )
+       ORDER BY d.id DESC`,
+      [email]
+    );
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const requests = result.rows.map((demande) => {
+      const isLevel1 = String(demande.mail_responsable1 || '').trim().toLowerCase() === email &&
+        !demande.approuve_responsable1;
+      const niveau = isLevel1 ? 1 : 2;
+      const approvalUrl = appendTenantParam(`${baseUrl}/approuver-demande?id=${demande.id}&niveau=${niveau}`, tenant.key);
+      return {
+        id: demande.id,
+        niveau,
+        employee: `${demande.nom || ''} ${demande.prenom || ''}`.trim(),
+        matricule: demande.matricule,
+        poste: demande.poste,
+        type_demande: demande.type_demande,
+        titre: demande.titre,
+        date_depart: demande.date_depart,
+        date_retour: demande.date_retour,
+        heure_depart: demande.heure_depart,
+        heure_retour: demande.heure_retour,
+        nombre_jours: demande.nombre_jours,
+        approvalUrl
+      };
+    });
+
+    res.json({ success: true, email, tenant: tenant.key, count: requests.length, requests });
+  } catch (err) {
+    console.error('❌ Erreur récupération approbations en attente:', err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des approbations: ' + err.message });
+  }
+});
+
+app.get('/approvals', async (req, res) => {
+  const email = String(req.query.email || '').trim().toLowerCase();
+
+  if (!email) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Approbations RH</title>
+        <style>
+          body { font-family: Arial, sans-serif; background:#f3f4f6; margin:0; padding:40px 16px; color:#111827; }
+          main { max-width:720px; margin:0 auto; background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:28px; }
+          label { display:block; font-weight:700; margin-bottom:8px; }
+          input { width:100%; box-sizing:border-box; padding:12px; border:1px solid #cbd5e1; border-radius:6px; font-size:15px; }
+          button { margin-top:14px; padding:12px 18px; background:#2563eb; color:#fff; border:0; border-radius:6px; font-weight:700; cursor:pointer; }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Approbations RH</h1>
+          <form method="GET" action="/approvals">
+            <label for="email">Email responsable</label>
+            <input id="email" name="email" type="email" placeholder="prenom.nom@avocarbon.com" required>
+            <input type="hidden" name="tenant" value="${escapeHtml(getTenantConfig(req).key)}">
+            <button type="submit">Voir les demandes</button>
+          </form>
+        </main>
+      </body>
+      </html>
+    `);
+  }
+
+  try {
+    const tenant = getTenantConfig(req);
+    const demandesTable = tableName(req, 'demande_rh');
+    const employeesTable = tableName(req, 'employees');
+    const result = await poolHR.query(
+      `SELECT d.*, e.nom, e.prenom, e.poste, e.matricule, e.adresse_mail,
+              e.mail_responsable1, e.mail_responsable2
+       FROM ${demandesTable} d
+       JOIN ${employeesTable} e ON d.employe_id = e.id
+       WHERE d.statut = 'en_attente'
+         AND (
+           (LOWER(e.mail_responsable1) = $1 AND COALESCE(d.approuve_responsable1, false) = false)
+           OR
+           (LOWER(e.mail_responsable2) = $1 AND COALESCE(d.approuve_responsable1, false) = true
+             AND COALESCE(d.approuve_responsable2, false) = false)
+         )
+       ORDER BY d.id DESC`,
+      [email]
+    );
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const rows = result.rows.map((demande) => {
+      const isLevel1 = String(demande.mail_responsable1 || '').trim().toLowerCase() === email &&
+        !demande.approuve_responsable1;
+      const niveau = isLevel1 ? 1 : 2;
+      const approvalUrl = appendTenantParam(`${baseUrl}/approuver-demande?id=${demande.id}&niveau=${niveau}`, tenant.key);
+      const typeLabel = demande.type_demande === 'conges' ? 'Conge' :
+        demande.type_demande === 'autorisation' ? 'Autorisation' : 'Mission';
+      const dateInfo = [
+        demande.date_depart ? `Depart: ${formatDateShort(demande.date_depart)}` : null,
+        demande.date_retour ? `Retour: ${formatDateShort(demande.date_retour)}` : null,
+        demande.heure_depart ? `Heure depart: ${escapeHtml(demande.heure_depart)}` : null,
+        demande.heure_retour ? `Heure retour: ${escapeHtml(demande.heure_retour)}` : null,
+        demande.nombre_jours ? `Jours: ${escapeHtml(demande.nombre_jours)}` : null
+      ].filter(Boolean).join(' | ');
+
+      return `
+        <article class="request">
+          <div class="request-top">
+            <div>
+              <h2>#${demande.id} - ${escapeHtml(typeLabel)} - ${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)}</h2>
+              <p class="muted">${escapeHtml(demande.poste || 'Poste non renseigne')} ${demande.matricule ? `- Matricule ${escapeHtml(demande.matricule)}` : ''}</p>
+            </div>
+            <span class="badge">Niveau ${niveau}</span>
+          </div>
+          <p><strong>Motif:</strong> ${escapeHtml(demande.titre || '')}</p>
+          <p class="muted">${escapeHtml(dateInfo || 'Dates non renseignees')}</p>
+          <a class="button" href="${approvalUrl}">Ouvrir / traiter</a>
+        </article>
+      `;
+    }).join('');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Approbations RH</title>
+        <style>
+          body { font-family: Arial, sans-serif; background:#f3f4f6; margin:0; padding:28px 16px; color:#111827; }
+          main { max-width:980px; margin:0 auto; }
+          header { margin-bottom:20px; }
+          h1 { margin:0 0 6px; font-size:26px; }
+          .muted { color:#64748b; }
+          .request { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:18px; margin-bottom:12px; }
+          .request-top { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
+          h2 { margin:0; font-size:18px; }
+          .badge { background:#fef3c7; color:#92400e; border-radius:999px; padding:5px 10px; font-size:13px; font-weight:700; white-space:nowrap; }
+          .button { display:inline-block; margin-top:10px; padding:11px 16px; background:#2563eb; color:#fff; border-radius:6px; text-decoration:none; font-weight:700; }
+          .empty { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:28px; text-align:center; }
+        </style>
+      </head>
+      <body>
+        <main>
+          <header>
+            <h1>Approbations RH en attente</h1>
+            <div class="muted">${escapeHtml(email)} - ${result.rows.length} demande(s)</div>
+          </header>
+          ${result.rows.length ? rows : '<div class="empty">Aucune demande en attente pour ce responsable.</div>'}
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('❌ Erreur page approbations:', err);
+    res.status(500).send('<h1>Erreur serveur</h1>');
+  }
+});
+
 app.get('/approuver-demande', async (req, res) => {
   const { id, niveau } = req.query;
 
@@ -3946,7 +4451,33 @@ app.get('/api/test-email', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
+app.get('/api/test-email-587', async (req, res) => {
+  try {
+    const transporter587 = createTransporterOAuthAlt();
+    const info = await transporter587.sendMail({
+      from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+      to: req.query.to || 'rami.mejri@avocarbon.com',
+      subject: 'Test port 587 - ' + new Date().toISOString(),
+      html: `<p>Test envoyé via port 587 (smtp.office365.com) à ${new Date().toISOString()}</p>`
+    });
+    res.json({ success: true, messageId: info.messageId, via: 'port 587 smtp.office365.com' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message, code: error.code });
+  }
+});
+app.get('/api/test-email-graph', async (req, res) => {
+  try {
+    const result = await sendEmailWithGraph({
+      from: { name: 'Administration STS', address: GRAPH_MAIL_FROM },
+      to: req.query.to || 'rami.mejri@avocarbon.com',
+      subject: 'Test Microsoft Graph Mail - ' + new Date().toISOString(),
+      html: `<p>Test envoyé via Microsoft Graph à ${new Date().toISOString()}</p>`
+    }, 'Test Microsoft Graph Mail');
+    res.json({ success: true, message: 'Email Graph envoyé', result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 app.get('/api/smtp-status', async (req, res) => {
   const statuses = [];
   for (let i = 0; i < emailPool.transporters.length; i++) {
@@ -4004,6 +4535,7 @@ app.listen(PORT, async () => {
   🚀 Serveur démarré sur le port ${PORT}
   =========================================
   📧 Approbation:     http://localhost:${PORT}/approuver-demande
+  ✅ Approbations:    http://localhost:${PORT}/approvals?email=responsable@avocarbon.com
   👥 Employés:        http://localhost:${PORT}/api/employees/actifs
   📋 Demandes:        http://localhost:${PORT}/api/demandes
   📄 Attestations:    http://localhost:${PORT}/api/generer-attestation
@@ -4012,6 +4544,8 @@ app.listen(PORT, async () => {
   🔧 Test SMTP:       http://localhost:${PORT}/api/test-email
   📊 SMTP Status:     http://localhost:${PORT}/api/smtp-status
   `);
+  console.log(`📨 Mail provider: ${getMailProvider()}`);
+  console.log(`📨 SMTP config: ${JSON.stringify(getSmtpConfigSummary())}`);
 
   await testDatabaseConnections();
   await ensureSalaryAdvanceTable();
