@@ -39,8 +39,9 @@ console.warn = (...a) => { pushToLogBuffer('warn', a); _origWarn(...a); };
 const app = express();
 
 // ==================== CORS CONFIG ====================
+// ==================== CORS CONFIG ====================
 const allowedOrigins = (process.env.CORS_ORIGINS ||
-  'https://request-rh.azurewebsites.net,http://localhost:3000,http://localhost:3001,http://localhost:4173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:4173')
+  'https://request-rh.azurewebsites.net,https://hr-back.azurewebsites.net,http://localhost:3000,http://localhost:3001,http://localhost:4173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:4173')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -51,8 +52,8 @@ app.use(cors({
       callback(null, true);
       return;
     }
-
-    callback(new Error(`CORS blocked for origin: ${origin}`));
+    console.warn(`⚠️ CORS blocked for origin: ${origin}`);
+    callback(null, false);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant'],
