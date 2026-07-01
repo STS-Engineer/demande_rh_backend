@@ -97,7 +97,7 @@ const createTransporter = () => {
   const parsedPort = Number.parseInt(String(process.env.SMTP_PORT || '25'), 10);
   const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 25;
   const secure = parseBooleanEnv(process.env.SMTP_SECURE, port === 465);
-  const defaultAuthMode = 'basic';
+  const defaultAuthMode = host.toLowerCase().includes('mail.protection.outlook.com') ? 'none' : 'basic';
   const authMode = String(process.env.SMTP_AUTH_MODE || defaultAuthMode).trim().toLowerCase();
   const smtpUser = normalizeOptionalTextInput(process.env.SMTP_USER) || 'administration.STS@avocarbon.com';
   const smtpPass = normalizeOptionalTextInput(process.env.SMTP_PASS) || 'shnlgdyfbcztbhxn';
