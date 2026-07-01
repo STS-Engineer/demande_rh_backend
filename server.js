@@ -3966,7 +3966,7 @@ try {
 
   cron.schedule('52 9 * * 1-5', async () => {
     console.log("⏰ Running automatic attendance reports...");
-    //await sendAttendanceReport();
+     await sendAttendanceReport();
     //await sendTeamAttendanceReportPerResponsable();
   }, { timezone: "Africa/Tunis" });
 
