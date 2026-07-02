@@ -4014,7 +4014,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
       }
 
-      await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve' WHERE id = $1`, [id]);
+      await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', approved_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
       return res.json({ success: true, message: 'Demande complètement approuvée et notifications envoyées' });
     }
 
@@ -4050,7 +4050,7 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
       return res.json({ success: true, message: `Demande approuvée par ${getApproverRoleLabel(currentStep.role)}. En attente de ${getApproverRoleLabel(nextStep.role)}.` });
     }
 
-    await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+    await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', updated_at = CURRENT_TIMESTAMP, approved_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
     await sendEmailWithRetryLogged({
       from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
       to: tenant.rhAdminEmail,
