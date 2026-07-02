@@ -1322,7 +1322,7 @@ function getDemandeDetailsHtml(demande) {
 function getDemandeCancellationRecipients(demande, tenantKey = TENANT_CONFIG.tunisia.key) {
   const tenant = TENANT_CONFIG[normalizeTenantKey(tenantKey)] || TENANT_CONFIG.tunisia;
   const recipients = [
-    tenant.rhAdminEmail,
+    isTunisia ? null : tenant.rhAdminEmail,
     demande.mail_responsable1,
     demande.mail_responsable2
   ];
