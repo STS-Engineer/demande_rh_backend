@@ -1321,6 +1321,8 @@ function getDemandeDetailsHtml(demande) {
 
 function getDemandeCancellationRecipients(demande, tenantKey = TENANT_CONFIG.tunisia.key) {
   const tenant = TENANT_CONFIG[normalizeTenantKey(tenantKey)] || TENANT_CONFIG.tunisia;
+  const isTunisia = normalizeTenantKey(tenantKey) === TENANT_CONFIG.tunisia.key;
+
   const recipients = [
     isTunisia ? null : tenant.rhAdminEmail,
     demande.mail_responsable1,
@@ -4013,9 +4015,52 @@ app.post('/api/demandes/:id/approuver', async (req, res) => {
         }, resp1 ? resp1.fullName : 'le premier responsable', tenant.key);
         return res.json({ success: true, message: 'Demande approuvée par le premier responsable, en attente du second' });
       }
+     await poolHR.query(
+  `UPDATE ${demandesTable}
+   SET statut = 'approuve',
+       approved_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP
+   WHERE id = $1`,
+  [id]
+);
 
-      await poolHR.query(`UPDATE ${demandesTable} SET statut = 'approuve', approved_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
-      return res.json({ success: true, message: 'Demande complètement approuvée et notifications envoyées' });
+const cancelUrl = getDemandeCancelUrl(id, tenant.key);
+
+if (demande.adresse_mail) {
+  await sendEmailWithRetryLogged({
+    from: { name: 'Administration STS', address: 'administration.STS@avocarbon.com' },
+    to: demande.adresse_mail,
+    subject: 'Votre demande RH a été approuvée',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color:#10b981;">✅ Demande RH approuvée</h2>
+
+        <p>Bonjour ${escapeHtml(demande.nom)} ${escapeHtml(demande.prenom)},</p>
+        <p>Votre demande RH a été approuvée.</p>
+
+        <div style="background:#f8fafc;padding:20px;border-radius:8px;margin:20px 0;">
+          <p><strong>Type :</strong> ${escapeHtml(getDemandeTypeLabel(demande.type_demande))}</p>
+          <p><strong>Motif :</strong> ${escapeHtml(demande.titre)}</p>
+          <p><strong>Date de départ :</strong> ${escapeHtml(formatDateShort(demande.date_depart))}</p>
+          ${demande.date_retour ? `<p><strong>Date de retour :</strong> ${escapeHtml(formatDateShort(demande.date_retour))}</p>` : ''}
+        </div>
+
+        <div style="background:#fff7ed;padding:16px;border-radius:8px;margin:20px 0;border-left:4px solid #f97316;">
+          <p>Si nécessaire, vous pouvez annuler cette demande approuvée tant que sa période n'est pas passée.</p>
+          <a href="${cancelUrl}"
+             style="display:inline-block;padding:12px 24px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">
+            Annuler la demande
+          </a>
+        </div>
+      </div>
+    `
+  }, 'Notification employé demande approuvée avec lien annulation', {
+    recipient: demande.adresse_mail,
+    demandeId: id
+  });
+}
+
+return res.json({ success: true, message: 'Demande complètement approuvée et notification envoyée à l’employé' });
     }
 
     const steps = workflowResolution.workflow || [];
